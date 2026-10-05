@@ -1,0 +1,102 @@
+.bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
+  padding: 1.25rem;
+  border: 1px solid #dde1ec;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.field label,
+.field legend {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #55607a;
+}
+
+.field select,
+.field input {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #c4cadb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+}
+
+fieldset.field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.checkboxGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding-top: 0.15rem;
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: inherit;
+  cursor: pointer;
+}
+
+.resetWrap {
+  display: flex;
+  align-items: flex-end;
+}
+
+.reset {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid #c4cadb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+  cursor: pointer;
+}
+
+.reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.reset:not(:disabled):hover {
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
+
+@media (prefers-color-scheme: dark) {
+  .bar {
+    background: #171c2b;
+    border-color: #333c52;
+  }
+
+  .field label,
+  .field legend {
+    color: #aab2c8;
+  }
+
+  .field select,
+  .field input,
+  .reset {
+    background: #10141f;
+    border-color: #3a4359;
+  }
+}

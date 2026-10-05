@@ -1,0 +1,63 @@
+.control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.field label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #55607a;
+}
+
+.field select {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #c4cadb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+}
+
+.direction {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid #c4cadb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.direction:hover {
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
+
+.summary {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.9rem;
+  color: #55607a;
+}
+
+@media (prefers-color-scheme: dark) {
+  .field label,
+  .summary {
+    color: #aab2c8;
+  }
+
+  .field select,
+  .direction {
+    background: #10141f;
+    border-color: #3a4359;
+  }
+}
