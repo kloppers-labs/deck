@@ -239,3 +239,14 @@ func collect(cmd tea.Cmd) []tea.Msg {
 	}
 	return []tea.Msg{msg}
 }
+
+func TestFooterKeepsGlobalsWhenCrowded(t *testing.T) {
+	m := sized(t, 80, 24)
+	footer := ansi.Strip(m.footer())
+	if !strings.Contains(footer, "q quit") || !strings.Contains(footer, "? help") {
+		t.Errorf("a crowded footer still ends with the global keys: %q", footer)
+	}
+	if w := ansi.StringWidth(footer); w > 80 {
+		t.Errorf("footer is %d wide", w)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"deck/internal/git"
 	"deck/internal/httpc"
 	"deck/internal/ui"
+	"deck/internal/ui/picker"
 	"deck/internal/viewer"
 )
 
@@ -95,6 +96,13 @@ type Model struct {
 	cardPath string
 	initCmd  tea.Cmd
 	spots    map[string]viewer.Spot
+	history  *viewer.History
+	pick     picker.Model
+	origin   pickOrigin
+	finder   finderState
+	grep     grepState
+	prompt   prompt
+	yPending bool
 	now      func() time.Time
 }
 
@@ -132,6 +140,7 @@ func New(dir string, cfg config.Config) Model {
 		icons:   cfg.Files.Icons,
 		metas:   newMetaCache(),
 		spots:   map[string]viewer.Spot{},
+		history: &viewer.History{},
 		now:     time.Now,
 	}
 	m.initCmd = tea.Batch(load, m.syncSelection())
@@ -183,9 +192,18 @@ func (m Model) layout() Layout {
 
 func (m *Model) relayout() {
 	l := m.layout()
-	m.tree.SetHeight(l.TreeInner().H - 1)
+	if !l.ShowTree {
+		m.prompt = prompt{}
+	}
+	rows := l.TreeInner().H - 1
+	if m.prompt.kind != promptNone {
+		rows--
+	}
+	m.tree.SetHeight(rows)
 	vi := l.ViewerInner()
 	m.viewer.SetSize(vi.W, vi.H)
+	r := m.pickerRect()
+	m.pick.SetSize(r.W, r.H)
 	if !l.ShowTree && m.focus == focusTree {
 		m.setFocus(focusViewer)
 	}
@@ -306,9 +324,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewer, cmd = m.viewer.Update(msg)
 		return m, cmd
+	case picker.PeekMsg, picker.AcceptMsg, picker.CancelMsg, picker.QueryMsg, picker.Msg:
+		return m.picked(msg)
+	case FinderIndexMsg:
+		return m.finderIndexed(msg)
+	case grepDueMsg, GrepChunkMsg, GrepDoneMsg:
+		return m.grepEvent(msg)
+	case opDoneMsg:
+		return m.opDone(msg)
+	case shellClosedMsg:
+		return m.shellClosed(msg)
 	case ReloadMsg:
 		return m.reload()
 	case RevealMsg:
+		m.finder.stale = true
 		return m.reveal(msg.Target)
 	case dirLoadedMsg:
 		m.tree.Loaded(msg)
@@ -319,6 +348,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	case RefreshBadgesMsg, tea.FocusMsg:
+		m.finder.stale = true
 		return m, m.refreshBadges()
 	case git.StatusLoadedMsg:
 		m.applyStatus(msg)
@@ -341,15 +371,30 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case InvalidateMsg:
 		return m.invalidate(msg.Saved)
 	case tea.MouseMsg:
+		if m.pick.Active() {
+			return m.pickerMouse(msg)
+		}
 		return m.mouse(msg)
 	case tea.KeyMsg:
 		m.clearHover()
-		if m.focus == focusViewer {
+		switch {
+		case m.pick.Active():
+			return m.pickerKey(msg)
+		case m.prompt.kind != promptNone:
+			return m.promptKey(msg)
+		case m.focus == focusViewer:
 			return m.viewerKey(msg)
 		}
 		return m.treeKey(msg)
 	}
-	return m, nil
+	var cmd tea.Cmd
+	switch {
+	case m.pick.Active():
+		m.pick, cmd = m.pick.Update(msg)
+	case m.prompt.kind != promptNone:
+		m.prompt.input, cmd = m.prompt.input.Update(msg)
+	}
+	return m, cmd
 }
 
 // paneKey handles the keys that work from both regions.
@@ -368,6 +413,10 @@ func (m *Model) paneKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		m.infoPath = ""
 		m.relayout()
 		return tea.Batch(m.viewer.ResizeCmd(), m.requestInfo()), true
+	case "ctrl+p":
+		return m.openFinder(), true
+	case "ctrl+f":
+		return m.openGrep(), true
 	}
 	return nil, false
 }
@@ -393,6 +442,17 @@ func (m Model) viewerKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) treeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.yPending {
+		m.yPending = false
+		switch msg.String() {
+		case "y":
+			return m, m.copyPath(false)
+		case "Y":
+			return m, m.copyPath(true)
+		case "esc":
+			return m, nil
+		}
+	}
 	if cmd, ok := m.paneKey(msg); ok {
 		return m, cmd
 	}
@@ -458,6 +518,26 @@ func (m Model) treeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, m.openEditor()
 	case "x":
 		return m, m.sendHTTPFile()
+	case "a":
+		return m.openPrompt(promptNew)
+	case "r":
+		return m.openPrompt(promptRename)
+	case "D":
+		return m.openPrompt(promptTrash)
+	case "y":
+		m.yPending = n != nil
+		return m, nil
+	case "o":
+		if n != nil {
+			return m, revealCmd(n.Path)
+		}
+		return m, nil
+	case "!":
+		dir := m.tree.Root().Path
+		if n != nil {
+			dir = n.Path
+		}
+		return m, shellCmd(dir)
 	default:
 		return m, nil
 	}
@@ -476,6 +556,18 @@ func (m Model) activate() (Model, tea.Cmd) {
 	cmd := m.syncSelection()
 	m.setFocus(focusViewer)
 	return m, cmd
+}
+
+func (m Model) copyPath(abs bool) tea.Cmd {
+	n := m.tree.Selected()
+	if n == nil {
+		return nil
+	}
+	p := n.Path
+	if rel, err := filepath.Rel(m.tree.Launch(), p); !abs && err == nil && filepath.IsLocal(rel) {
+		p = rel
+	}
+	return copyCmd(p, p)
 }
 
 func (m Model) sendHTTPFile() tea.Cmd {
@@ -501,6 +593,7 @@ func (m Model) openEditor() tea.Cmd {
 
 func (m Model) reload() (Model, tea.Cmd) {
 	m.tree.Reload()
+	m.finder.stale = true
 	m.infoPath = ""
 	badges := m.refreshBadges()
 	n := m.tree.Selected()
@@ -517,15 +610,8 @@ func (m Model) reveal(t editor.Target) (Model, tea.Cmd) {
 	if t.Path == "" {
 		return m, nil
 	}
-	m.tree.Reload()
-	m.tree.Reveal(t.Path)
 	m.rememberSpot()
-	m.shown, m.cardPath = t.Path, ""
-	spot := viewer.Spot{Line: max(t.Line-1, 0), Col: max(t.Col-1, 0), Top: t.Top - 1}
-	var cmd tea.Cmd
-	m.viewer, cmd = m.viewer.Open(t.Path, &spot)
-	m.setFocus(focusViewer)
-	return m, tea.Batch(cmd, m.refreshBadges(), m.requestInfo())
+	return m.show(t.Path, &viewer.Spot{Line: max(t.Line-1, 0), Col: max(t.Col-1, 0), Top: t.Top - 1})
 }
 
 func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
@@ -617,17 +703,28 @@ func (m Model) hoverRow(n *Node, y int) (Model, tea.Cmd) {
 	return m, tea.Tick(hoverDelay, func(time.Time) tea.Msg { return hoverDueMsg{seq: seq} })
 }
 
-// Capturing reports whether typed text belongs to the pane: a viewer prompt or
-// pending chord. The tree never captures.
+// Capturing reports whether typed text belongs to the pane: the picker, an
+// inline prompt, a pending y chord, or a viewer prompt or chord.
 func (m Model) Capturing() bool {
-	return m.focus == focusViewer && m.viewer.Capturing()
+	return m.pick.Active() || m.prompt.kind != promptNone || m.yPending ||
+		(m.focus == focusViewer && m.viewer.Capturing())
 }
 
 var (
+	findBinding  = key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "find file"))
+	grepBinding  = key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "grep"))
 	treeBindings = []key.Binding{
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		key.NewBinding(key.WithKeys("l", "h"), key.WithHelp("l/h", "fold")),
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+		findBinding,
+		grepBinding,
+		key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "new")),
+		key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rename")),
+		key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "trash")),
+		key.NewBinding(key.WithKeys("y"), key.WithHelp("yy/yY", "copy path")),
+		key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "reveal")),
+		key.NewBinding(key.WithKeys("!"), key.WithHelp("!", "shell")),
 		key.NewBinding(key.WithKeys("-", "=", "~"), key.WithHelp("-/=/~", "root")),
 		key.NewBinding(key.WithKeys(".", "I"), key.WithHelp("./I", "hide")),
 		key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
@@ -639,13 +736,38 @@ var (
 	}
 	viewerExtras = []key.Binding{
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		findBinding,
+		grepBinding,
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
 		key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "tree")),
 	}
+	grepToggles = []key.Binding{
+		key.NewBinding(key.WithKeys("alt+r"), key.WithHelp("alt+r", "regex")),
+		key.NewBinding(key.WithKeys("alt+c"), key.WithHelp("alt+c", "case")),
+		key.NewBinding(key.WithKeys("alt+g"), key.WithHelp("alt+g", "glob (last word)")),
+	}
+	promptBindings = []key.Binding{
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
+	}
+	confirmBindings = []key.Binding{
+		key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "move to trash")),
+		key.NewBinding(key.WithKeys("n"), key.WithHelp("any other key", "cancel")),
+	}
 )
 
-// HelpBindings returns the key hints for whichever region has focus.
+// HelpBindings returns the key hints for whatever has the keyboard.
 func (m Model) HelpBindings() []key.Binding {
+	switch {
+	case m.pick.Active() && m.pick.ID() == pickGrep:
+		return append(append([]key.Binding{}, picker.Bindings...), grepToggles...)
+	case m.pick.Active():
+		return picker.Bindings
+	case m.prompt.kind == promptTrash:
+		return confirmBindings
+	case m.prompt.kind != promptNone:
+		return promptBindings
+	}
 	if m.focus == focusViewer {
 		return append(append([]key.Binding{}, viewerExtras...), m.viewer.HelpBindings()...)
 	}
@@ -699,10 +821,21 @@ func (m Model) View() string {
 		r := viewer.PlacePopup(anchor, lipgloss.Width(tip), lipgloss.Height(tip), ui.Rect{W: m.width, H: m.height})
 		body = ui.Overlay(body, tip, r.X, r.Y)
 	}
+	if m.pick.Active() {
+		r := m.pickerRect()
+		body = ui.Overlay(body, m.pick.View(), r.X, r.Y)
+	}
 	return ui.Fit(body, m.width, m.height)
 }
 
 func (m Model) treeView(w, h int) string {
+	if m.prompt.kind != promptNone && h > 1 {
+		return ui.Fit(m.treeRows(w, h-1), w, h-1) + "\n" + m.prompt.view(w)
+	}
+	return m.treeRows(w, h)
+}
+
+func (m Model) treeRows(w, h int) string {
 	out := []string{m.treeHeader(w)}
 	root := m.tree.Root()
 	rows, top := m.tree.Visible()

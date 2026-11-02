@@ -19,9 +19,13 @@ func keyMsg(s string) tea.KeyMsg {
 	special := map[string]tea.KeyType{
 		"enter": tea.KeyEnter, "esc": tea.KeyEsc, "right": tea.KeyRight, "left": tea.KeyLeft,
 		"down": tea.KeyDown, "up": tea.KeyUp, "backspace": tea.KeyBackspace, "ctrl+b": tea.KeyCtrlB,
+		"ctrl+p": tea.KeyCtrlP, "ctrl+f": tea.KeyCtrlF,
 	}
 	if k, ok := special[s]; ok {
 		return tea.KeyMsg{Type: k}
+	}
+	if r, ok := strings.CutPrefix(s, "alt+"); ok {
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r), Alt: true}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }

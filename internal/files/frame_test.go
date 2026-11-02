@@ -156,3 +156,44 @@ func TestLoadErrorShownInPane(t *testing.T) {
 		t.Errorf("height with an error = %d, want 12", got)
 	}
 }
+
+func TestOverlaysKeepTheOuterBox(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat("y", 90)
+	writeLines(t, filepath.Join(dir, long+".txt"), 30)
+	useIndex(t, long+".txt")
+	for _, keys := range [][]string{{"ctrl+p"}, {"ctrl+f"}, {"r"}, {"D"}, {"a"}} {
+		for _, size := range [][2]int{{60, 11}, {80, 19}, {200, 45}} {
+			m := started(t, dir, size[0], size[1])
+			m, _ = press(t, m, keys...)
+			if !m.Capturing() && m.layout().ShowTree {
+				t.Fatalf("%v at %v should capture", keys, size)
+			}
+			v := m.View()
+			if got := lipgloss.Height(v); got != size[1] {
+				t.Errorf("%v at %v: height = %d", keys, size, got)
+			}
+			if got := lipgloss.Width(v); got > size[0] {
+				t.Errorf("%v at %v: width = %d", keys, size, got)
+			}
+		}
+	}
+}
+
+func TestPickerClickOutsideCancels(t *testing.T) {
+	dir := fixture(t, map[string]int{"a.go": 3, "b.go": 3})
+	useIndex(t, "a.go", "b.go")
+	m := started(t, dir, 120, 30)
+	m, _ = press(t, m, "ctrl+p")
+	r := m.pickerRect()
+	m, cmd := m.Update(tea.MouseMsg{X: r.X + 5, Y: r.Y + 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m, _ = settle(t, m, cmd)
+	if !m.pick.Active() || m.viewer.Path() != filepath.Join(dir, "b.go") {
+		t.Errorf("a click on a picker row selects and peeks it: viewer %q", m.viewer.Path())
+	}
+	m, cmd = m.Update(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m, _ = settle(t, m, cmd)
+	if m.pick.Active() || m.viewer.Path() != filepath.Join(dir, "a.go") {
+		t.Errorf("a click outside cancels and restores: active %v viewer %q", m.pick.Active(), m.viewer.Path())
+	}
+}

@@ -541,25 +541,33 @@ var quitFooter = []key.Binding{
 	key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "force quit")),
 }
 
-func (m Model) footerBindings() []key.Binding {
+// footerBindings splits the footer into the active pane's hints and the global
+// tail, which always stays visible.
+func (m Model) footerBindings() (pane, global []key.Binding) {
 	if m.quit.asking || m.quit.stopping {
-		return quitFooter
+		return nil, quitFooter
 	}
 	if m.help.open {
-		return helpFooter
+		return nil, helpFooter
 	}
-	var b []key.Binding
 	if !m.mouseOn {
-		b = append(b, mouseOffHint)
+		global = append(global, mouseOffHint)
 	}
-	b = append(b, m.paneBindings()...)
-	b = append(b, ui.Keys.Tab)
+	global = append(global, ui.Keys.Tab)
 	if m.capturing() {
-		return append(b, ui.Keys.Normal)
+		return m.paneBindings(), append(global, ui.Keys.Normal)
 	}
-	return append(b, ui.Keys.Help, ui.Keys.Quit)
+	return m.paneBindings(), append(global, ui.Keys.Help, ui.Keys.Quit)
 }
 
 func (m Model) footer() string {
-	return m.keyHelp.ShortHelpView(m.footerBindings())
+	pane, global := m.footerBindings()
+	tail := m.keyHelp.ShortHelpView(global)
+	if len(pane) == 0 {
+		return tail
+	}
+	sep := m.keyHelp.Styles.ShortSeparator.Render(m.keyHelp.ShortSeparator)
+	head := m.keyHelp
+	head.Width = max(m.width-lipgloss.Width(tail)-lipgloss.Width(sep), 1)
+	return head.ShortHelpView(pane) + sep + tail
 }
