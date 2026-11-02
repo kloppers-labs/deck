@@ -1,0 +1,22 @@
+{
+    "Alt-q": "QuitAll",
+    "Alt-t": "command:tree",
+    "F12": "command:lsp goto-definition",
+    "Alt-d": "command:lsp goto-definition",
+    "Alt-i": "command:lsp goto-implementation",
+    "Alt-y": "command:lsp goto-typedefinition",
+    "Alt-r": "command:lsp find-references",
+    "Alt-k": "command:lsp hover",
+    "Alt-s": "command:lsp document-symbols",
+    "Alt-e": "command:lsp diagnostic-info",
+    "F2": "command:lsp rename",
+    "F8": "command:lsp format",
+    "CtrlSpace": "command:lsp autocomplete",
+    "Alt-MouseLeft": "lua:deck.gotoAtMouse",
+    "Alt-{": "command:OmniPreviousHistory",
+    "Alt-}": "command:OmniNextHistory",
+    "Ctrl-p": "command:OmniGotoFile",
+    "Alt-F": "command:OmniGlobalSearch",
+    "Alt-l": "command:OmniLocalSearch",
+    "Alt-j": "command:OmniJump"
+}

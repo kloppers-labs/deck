@@ -1,0 +1,13 @@
+[{
+  "Name": "deck",
+  "Description": "Position bridge between deck and micro",
+  "Tags": ["deck"],
+  "Versions": [
+    {
+      "Version": "1.0.0",
+      "Require": {
+        "micro": ">=2.0.0"
+      }
+    }
+  ]
+}]

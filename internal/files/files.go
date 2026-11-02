@@ -304,6 +304,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.reload()
 	case RevealMsg:
 		return m.reveal(msg.Target)
+	case InvalidateMsg:
+		return m.invalidate(msg.Saved)
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:

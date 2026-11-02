@@ -54,9 +54,6 @@ const (
 	maxToasts       = 8
 )
 
-// editorClosedMsg fires when the launched editor exits and deck regains the TTY.
-type editorClosedMsg struct{ err error }
-
 type toastExpireMsg struct{ id int }
 
 type toast struct {
@@ -82,6 +79,7 @@ type Model struct {
 	toasts     []toast
 	toastSeq   int
 	mouseOn    bool
+	ed         editorState
 	lastMotion *cell
 	width      int
 	height     int
@@ -105,6 +103,7 @@ func New(cfg config.Config, warnings []config.Warning) Model {
 		keyHelp: newKeyHelp(),
 		help:    newHelpState(),
 		mouseOn: cfg.Mouse != "off",
+		ed:      newEditorState(cfg),
 	}
 }
 
@@ -129,7 +128,7 @@ func newKeyHelp() help.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init())
+	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init(), m.ed.syncCmd())
 }
 
 func (m Model) warningToast() tea.Cmd {
@@ -195,19 +194,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.mouse(msg)
 
 	case editor.OpenMsg:
-		c := editor.Command(m.cfg.Editor, msg.Target)
-		return m, tea.ExecProcess(c, func(err error) tea.Msg {
-			return editorClosedMsg{err: err}
-		})
+		return m.openEditor(msg.Target)
+
+	case editor.SyncedMsg:
+		return m.bundleSynced(msg)
 
 	case git.GenCommitMsgRequest:
 		return m, generateCommitMsg(msg.Ctx, msg.Repo, m.cfg.AIBackend, m.cfg.AIModel)
 
 	case editorClosedMsg:
-		if msg.err != nil {
-			return m, tea.Batch(git.Refresh, files.ReloadCurrent, ui.Toast(ui.LevelError, "editor: "+msg.err.Error()))
-		}
-		return m, tea.Batch(git.Refresh, files.ReloadCurrent)
+		return m.editorClosed(msg)
 
 	case toastExpireMsg:
 		m.toasts = withoutToast(m.toasts, msg.id)

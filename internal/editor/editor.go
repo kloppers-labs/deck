@@ -1,21 +1,12 @@
-// Package editor builds the command deck uses to launch the user's editor.
-//
-// For micro specifically, deck ships its own Dracula colorscheme and points
-// micro at a private config directory via MICRO_CONFIG_HOME, so the editor
-// matches deck's palette without touching the user's own ~/.config/micro. deck
-// owns the contents of ~/.config/deck/micro; users should not edit it.
-//
-// Any other editor is launched plainly. Theming is best-effort: if the private
-// config can't be written, the editor still launches without it.
+// Package editor launches the user's editor at a position and, for micro, ships
+// deck's bundled runtime (plugins, settings, bindings) and reads back where it closed.
 package editor
 
 import (
-	_ "embed"
+	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,92 +28,43 @@ func (OpenMsg) RouteTo() ui.Dest { return ui.DestApp }
 
 func Open(t Target) tea.Cmd { return func() tea.Msg { return OpenMsg{Target: t} } }
 
-//go:embed colorschemes/dracula.micro
-var draculaMicro []byte
+// Mode says whether deck hands the terminal to the editor or lets it run alongside.
+type Mode int
 
-// settingsJSON seeds sensible micro defaults in deck's private config. The
-// colorscheme is also forced via CLI flag, so this mainly carries the editing
-// ergonomics.
-const settingsJSON = `{
-  "colorscheme": "dracula",
-  "syntax": true,
-  "softwrap": true,
-  "ruler": true,
-  "tabsize": 4
-}
-`
+const (
+	Suspend Mode = iota
+	Detach
+)
 
-// configHome resolves deck's private micro config directory. It's a variable so
-// tests can redirect it away from the real home directory.
-var configHome = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "deck", "micro"), nil
+// Opts carries what Launch needs beyond the editor string and target.
+// ConfigDir is deck's micro runtime; empty means micro runs with the user's own config.
+type Opts struct {
+	ConfigDir string
+	StateFile string
+	Cwd       string
+	Environ   []string
 }
 
-// Command launches the configured editor (which may carry arguments) on t. micro
-// also gets +LINE:COL and deck's colorscheme unless the user set one.
-func Command(editor string, t Target) *exec.Cmd {
-	parts := strings.Fields(editor)
-	if len(parts) == 0 {
-		parts = []string{"micro"}
+// Launch builds the command that opens t in the configured editor.
+func Launch(editorCfg string, t Target, o Opts) (*exec.Cmd, Mode, error) {
+	if t.Path == "" {
+		return nil, Suspend, errors.New("no file to open")
 	}
-	name, args := parts[0], parts[1:]
-	if filepath.Base(name) != "micro" {
-		return exec.Command(name, append(args, t.Path)...)
+	var extra []string
+	if IsMicro(editorCfg) && o.ConfigDir != "" && !slices.Contains(strings.Fields(editorCfg), "-colorscheme") {
+		extra = []string{"-colorscheme", "dracula"}
 	}
-	if pos := microPosition(t); pos != "" {
-		args = append(args, pos)
+	name, args, mode := buildArgs(editorCfg, t, extra)
+	c := exec.Command(name, args...)
+	if IsMicro(editorCfg) {
+		configureMicro(c, t, o)
 	}
-	dir, err := Prepare()
-	if err != nil {
-		return exec.Command(name, append(args, t.Path)...)
-	}
-	if !slices.Contains(args, "-colorscheme") {
-		args = append(args, "-colorscheme", "dracula")
-	}
-	c := exec.Command(name, append(args, t.Path)...)
-	c.Env = append(os.Environ(),
-		"MICRO_CONFIG_HOME="+dir,
-		"MICRO_TRUECOLOR=1",
-	)
-	return c
+	return c, mode, c.Err
 }
 
-// Prepare writes deck's bundled micro colorscheme and default settings into the
-// private config directory, returning its path. The colorscheme is rewritten on
-// every call so theme updates reach users; settings.json is only seeded if
-// absent.
-func Prepare() (string, error) {
-	dir, err := configHome()
-	if err != nil {
-		return "", err
+func environ(o Opts) []string {
+	if o.Environ != nil {
+		return slices.Clone(o.Environ)
 	}
-	csDir := filepath.Join(dir, "colorschemes")
-	if err := os.MkdirAll(csDir, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(csDir, "dracula.micro"), draculaMicro, 0o644); err != nil {
-		return "", err
-	}
-	settingsPath := filepath.Join(dir, "settings.json")
-	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
-		if err := os.WriteFile(settingsPath, []byte(settingsJSON), 0o644); err != nil {
-			return "", err
-		}
-	}
-	return dir, nil
-}
-
-func microPosition(t Target) string {
-	if t.Line <= 0 {
-		return ""
-	}
-	pos := "+" + strconv.Itoa(t.Line)
-	if t.Col > 0 {
-		pos += ":" + strconv.Itoa(t.Col)
-	}
-	return pos
+	return os.Environ()
 }
