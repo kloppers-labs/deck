@@ -84,20 +84,30 @@ func TestWheelOverViewerScrollsViewer(t *testing.T) {
 	dir := t.TempDir()
 	writeLines(t, filepath.Join(dir, "a-long.txt"), 300)
 	writeLines(t, filepath.Join(dir, "b.txt"), 3)
-	m := started(t, dir, 90, 20)
-	listW := m.listWidth()
+	m := started(t, dir, 100, 20)
+	vx := m.layout().ViewerInner().X
 
-	m, _ = m.Update(wheel(listW+5, 4, true))
+	m, _ = m.Update(wheel(vx+5, 4, true))
 	if top := m.viewer.Spot().Top; top != 3 {
 		t.Errorf("viewer top = %d, want 3 after one wheel notch over the viewer", top)
 	}
-	if m.list.Index() != 0 {
-		t.Errorf("wheel over the viewer moved the file cursor to %d", m.list.Index())
+	if m.tree.sel != 0 {
+		t.Errorf("wheel over the viewer moved the tree selection to %d", m.tree.sel)
 	}
+}
 
-	m, _ = m.Update(wheel(1, 4, true))
-	if m.list.Index() != 1 {
-		t.Errorf("wheel over the list: cursor = %d, want 1", m.list.Index())
+func TestWheelOverTreeScrollsTree(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 40 {
+		writeLines(t, filepath.Join(dir, fmt.Sprintf("f%02d.txt", i)), 1)
+	}
+	m := started(t, dir, 100, 20)
+	m, _ = m.Update(wheel(3, 4, true))
+	if _, top := m.tree.Visible(); top != wheelRows {
+		t.Errorf("tree top = %d, want %d after one wheel notch", top, wheelRows)
+	}
+	if m.tree.sel != 0 || m.viewer.Path() != filepath.Join(dir, "f00.txt") {
+		t.Error("scrolling the tree must not change the selection")
 	}
 }
 
@@ -106,16 +116,16 @@ func TestClickSelectsRow(t *testing.T) {
 	for _, name := range []string{"a.go", "b.go", "c.go"} {
 		writeLines(t, filepath.Join(dir, name), 1)
 	}
-	m := started(t, dir, 90, 20)
-	m, _ = m.Update(tea.MouseMsg{X: 1, Y: ListTop + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m := started(t, dir, 100, 20)
+	m, _ = m.Update(tea.MouseMsg{X: 2, Y: ListTop + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if got := filepath.Base(m.SelectedPath()); got != "c.go" {
 		t.Errorf("clicking the third row selected %q, want c.go", got)
 	}
-	m, _ = m.Update(tea.MouseMsg{X: 1, Y: ListTop + 7, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m, _ = m.Update(tea.MouseMsg{X: 2, Y: ListTop + 7, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if got := filepath.Base(m.SelectedPath()); got != "c.go" {
 		t.Errorf("clicking below the last row changed the selection to %q", got)
 	}
-	m, _ = m.Update(tea.MouseMsg{X: m.listWidth() + 3, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m, _ = m.Update(tea.MouseMsg{X: m.layout().ViewerInner().X + 3, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.focus != focusViewer {
 		t.Error("clicking the viewer should focus it")
 	}
@@ -126,9 +136,9 @@ func TestLongNamesTruncatedInRows(t *testing.T) {
 	long := strings.Repeat("n", 80) + ".go"
 	writeLines(t, filepath.Join(dir, long), 1)
 	m := New(dir, config.Default())
-	m.SetSize(60, 12)
+	m.SetSize(100, 12)
 	for i, line := range strings.Split(m.View(), "\n") {
-		if strings.Contains(ansi.Strip(line), strings.Repeat("n", 30)) && !strings.Contains(ansi.Strip(line), "…") {
+		if strings.Contains(ansi.Strip(line), strings.Repeat("n", 20)) && !strings.Contains(ansi.Strip(line), "…") {
 			t.Errorf("row %d shows a long name without truncation: %q", i, ansi.Strip(line))
 		}
 	}
@@ -136,10 +146,8 @@ func TestLongNamesTruncatedInRows(t *testing.T) {
 
 func TestLoadErrorShownInPane(t *testing.T) {
 	dir := t.TempDir()
-	m := New(dir, config.Default())
-	m.SetSize(80, 12)
-	m.dir = filepath.Join(dir, "gone")
-	m.load("")
+	m := New(filepath.Join(dir, "gone"), config.Default())
+	m.SetSize(100, 12)
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "no such file") {
 		t.Errorf("load error not shown:\n%s", v)

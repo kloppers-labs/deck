@@ -94,7 +94,7 @@ func New(cfg config.Config, warnings []config.Warning) Model {
 		cfg:      cfg,
 		warnings: warnings,
 		project:  projectName(),
-		files:    files.New("", cfg),
+		files:    files.New("", cfg).WithBadges(gitBadges),
 		git: git.NewPane(git.Options{
 			Theme:         cfg.Theme,
 			CommitAI:      aicommit.Available(cfg.AIBackend),
@@ -172,8 +172,11 @@ func (m Model) capturing() bool {
 }
 
 func (m Model) focusCmd() tea.Cmd {
-	if m.active == tabGit {
+	switch m.active {
+	case tabGit:
 		return git.Refresh
+	case tabFiles:
+		return files.RefreshBadges
 	}
 	return nil
 }

@@ -245,7 +245,7 @@ func (m Model) bodyHeight() int { return max(m.height-2, 0) }
 
 func (m Model) gutterWidth() int {
 	raw, _ := m.lines()
-	if !m.numbers || m.showingMD() || len(raw) == 0 {
+	if !m.numbers || m.showingMD() || len(raw) == 0 || m.doc.virtual {
 		return 0
 	}
 	return len(strconv.Itoa(len(raw))) + 3
