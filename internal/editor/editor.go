@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"deck/internal/ui"
 )
 
@@ -32,6 +34,8 @@ type Target struct {
 type OpenMsg struct{ Target Target }
 
 func (OpenMsg) RouteTo() ui.Dest { return ui.DestApp }
+
+func Open(t Target) tea.Cmd { return func() tea.Msg { return OpenMsg{Target: t} } }
 
 //go:embed colorschemes/dracula.micro
 var draculaMicro []byte

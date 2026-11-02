@@ -21,6 +21,7 @@ import (
 
 	"deck/internal/config"
 	"deck/internal/editor"
+	"deck/internal/httpc"
 	"deck/internal/ui"
 	"deck/internal/viewer"
 )
@@ -336,12 +337,24 @@ func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, cmd
 		case "e":
 			return m, m.openEditor()
+		case "x":
+			if cmd := m.sendHTTPFile(); cmd != nil {
+				return m, cmd
+			}
 		}
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	sync := m.syncSelection()
 	return m, tea.Batch(cmd, sync)
+}
+
+func (m Model) sendHTTPFile() tea.Cmd {
+	e, ok := m.selected()
+	if !ok || e.isDir || !strings.EqualFold(filepath.Ext(e.name), ".http") {
+		return nil
+	}
+	return httpc.LoadRequest(filepath.Join(m.dir, e.name), 0)
 }
 
 func (m Model) openEditor() tea.Cmd {
@@ -462,6 +475,7 @@ var (
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←", "up dir")),
 		key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "send .http to HTTP")),
 	}
 	backToList = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list"))
 )

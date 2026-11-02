@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -12,10 +13,16 @@ import (
 	"deck/internal/config"
 )
 
+const stopTimeout = 5 * time.Second
+
 func main() {
 	cfg, warnings := config.Load()
 	p := tea.NewProgram(app.New(cfg, warnings), programOptions(cfg.Mouse)...)
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if m, ok := final.(app.Model); ok {
+		m.StopAll(stopTimeout)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "deck:", err)
 		os.Exit(1)
 	}

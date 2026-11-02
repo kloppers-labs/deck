@@ -14,7 +14,7 @@ import (
 )
 
 func TestAltDigitJumpsWhileCapturing(t *testing.T) {
-	m := update(t, newModel(), keyMsg("4"))
+	m := update(t, newModel(), keyMsg("4"), keyMsg("i"))
 	if !m.capturing() {
 		t.Fatal("the HTTP tab should capture the keyboard")
 	}
@@ -27,7 +27,7 @@ func TestAltDigitJumpsWhileCapturing(t *testing.T) {
 }
 
 func TestF1HelpWhileCapturing(t *testing.T) {
-	m := update(t, newModel(), keyMsg("4"), keyMsg("f1"))
+	m := update(t, newModel(), keyMsg("4"), keyMsg("i"), keyMsg("f1"))
 	if !m.help.open {
 		t.Fatal("F1 should open help even while the HTTP input captures")
 	}
@@ -47,7 +47,7 @@ func TestFilesPreviewDoesNotCapture(t *testing.T) {
 }
 
 func TestFooterWhileCapturing(t *testing.T) {
-	m := update(t, sized(t, 160, 30), keyMsg("4"))
+	m := update(t, sized(t, 160, 30), keyMsg("4"), keyMsg("i"))
 	footer := ansi.Strip(m.footer())
 	if !strings.Contains(footer, "esc normal") {
 		t.Errorf("capturing footer %q should offer esc normal", footer)

@@ -20,6 +20,7 @@ type KeyMap struct {
 	Help        key.Binding
 	HelpAlways  key.Binding
 	ToggleMouse key.Binding
+	Rerun       key.Binding
 	Normal      key.Binding
 }
 
@@ -85,6 +86,10 @@ var Keys = KeyMap{
 		key.WithKeys("alt+m"),
 		key.WithHelp("alt+m", "toggle mouse"),
 	),
+	Rerun: key.NewBinding(
+		key.WithKeys("ctrl+r"),
+		key.WithHelp("ctrl+r", "re-run last task"),
+	),
 	Normal: key.NewBinding(
 		key.WithKeys("esc"),
 		key.WithHelp("esc", "normal"),
@@ -96,6 +101,6 @@ func (k KeyMap) GlobalBindings() []key.Binding {
 	return []key.Binding{
 		k.Tab, k.PrevTab, k.Files, k.Git, k.Run, k.HTTP,
 		k.AltFiles, k.AltGit, k.AltRun, k.AltHTTP,
-		k.Help, k.HelpAlways, k.ToggleMouse, k.Quit, k.ForceQuit,
+		k.Help, k.HelpAlways, k.ToggleMouse, k.Rerun, k.Quit, k.ForceQuit,
 	}
 }

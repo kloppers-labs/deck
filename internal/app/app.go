@@ -78,6 +78,7 @@ type Model struct {
 	httpc      httpc.Pane
 	keyHelp    help.Model
 	help       helpState
+	quit       quitState
 	toasts     []toast
 	toastSeq   int
 	mouseOn    bool
@@ -128,7 +129,7 @@ func newKeyHelp() help.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast())
+	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init())
 }
 
 func (m Model) warningToast() tea.Cmd {
@@ -162,6 +163,8 @@ func (m Model) capturing() bool {
 		return m.files.Capturing()
 	case tabGit:
 		return m.git.Capturing()
+	case tabRun:
+		return m.run.Capturing()
 	case tabHTTP:
 		return m.httpc.Capturing()
 	}
@@ -247,8 +250,15 @@ func (m Model) routeTo(dest ui.Dest, msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch dest {
 	case ui.DestApp:
-		if t, ok := msg.(ui.ToastMsg); ok {
-			return m.addToast(t)
+		switch msg := msg.(type) {
+		case ui.ToastMsg:
+			return m.addToast(msg)
+		case ui.FocusTabMsg:
+			for i, d := range tabDests {
+				if d == msg.Dest {
+					return m, m.jump(tab(i))
+				}
+			}
 		}
 	case ui.DestFiles:
 		m.files, cmd = m.files.Update(msg)
@@ -291,7 +301,10 @@ func (m *Model) jump(t tab) tea.Cmd {
 
 func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if key.Matches(msg, ui.Keys.ForceQuit) {
-		return tea.Quit, true
+		return m.requestQuit(true), true
+	}
+	if m.quit.asking || m.quit.stopping {
+		return m.quitKey(msg), true
 	}
 	if m.help.open {
 		return m.helpKey(msg), true
@@ -320,7 +333,11 @@ func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 	switch {
 	case key.Matches(msg, ui.Keys.Quit):
-		return tea.Quit, true
+		return m.requestQuit(false), true
+	case key.Matches(msg, ui.Keys.Rerun):
+		var cmd tea.Cmd
+		m.run, cmd = m.run.Rerun()
+		return cmd, true
 	case key.Matches(msg, ui.Keys.Help):
 		m.openHelp()
 		return nil, true
@@ -384,7 +401,10 @@ func (m Model) View() string {
 		return ui.Fit(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg), m.width, m.height)
 	}
 	body := ui.Fit(m.paneView(), m.width, m.bodyHeight())
-	if m.help.open {
+	switch {
+	case m.quit.asking || m.quit.stopping:
+		body = m.quitOverlay(body)
+	case m.help.open:
 		body = m.helpOverlay(body)
 	}
 	frame := strings.Join([]string{
@@ -400,9 +420,7 @@ func (m Model) tabLabels() []string {
 	labels := make([]string, len(tabNames))
 	for i, name := range tabNames {
 		if tab(i) == tabRun {
-			if n := m.run.RunningCount(); n > 0 {
-				name += lipgloss.NewStyle().Foreground(ui.ColorString).Render(fmt.Sprintf("(%d)", n))
-			}
+			name += m.runBadge()
 		}
 		if tab(i) == m.active {
 			labels[i] = ui.TabActive.Render(name)
@@ -420,6 +438,20 @@ func (m Model) tabWidths() []int {
 		widths[i] = lipgloss.Width(l)
 	}
 	return widths
+}
+
+func (m Model) runBadge() string {
+	var parts []string
+	if n := m.run.RunningCount(); n > 0 {
+		parts = append(parts, lipgloss.NewStyle().Foreground(ui.ColorString).Render(fmt.Sprintf("%d", n)))
+	}
+	if n := m.run.FailedCount(); n > 0 {
+		parts = append(parts, ui.Err.Render(fmt.Sprintf("✗%d", n)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, " ") + ")"
 }
 
 // tabBar renders bordered tabs; the Run tab carries a live running-count badge
@@ -504,7 +536,16 @@ func (m Model) paneBindings() []key.Binding {
 
 var mouseOffHint = key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("alt+m", "mouse off"))
 
+var quitFooter = []key.Binding{
+	key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "stop tasks and quit")),
+	key.NewBinding(key.WithKeys("n"), key.WithHelp("n/esc", "cancel")),
+	key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "force quit")),
+}
+
 func (m Model) footerBindings() []key.Binding {
+	if m.quit.asking || m.quit.stopping {
+		return quitFooter
+	}
 	if m.help.open {
 		return helpFooter
 	}

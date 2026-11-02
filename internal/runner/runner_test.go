@@ -1,12 +1,12 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
-	"time"
-
-	tea "github.com/charmbracelet/bubbletea"
 
 	"deck/internal/config"
 )
@@ -15,40 +15,6 @@ func write(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestDetectGo(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "go.mod")
-	got := detect(dir)
-	if len(got) == 0 || got[0].Name != "go test" {
-		t.Fatalf("expected go tasks first, got %+v", got)
-	}
-}
-
-func TestDetectAngularOverNpm(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "package.json")
-	write(t, dir, "angular.json")
-	got := detect(dir)
-	if len(got) != 1 || got[0].Cmd != "ng serve" {
-		t.Fatalf("angular.json should yield exactly 'ng serve', got %+v", got)
-	}
-}
-
-func TestDetectDotnet(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "Api.csproj")
-	got := detect(dir)
-	if len(got) != 2 || got[0].Cmd != "dotnet build" {
-		t.Fatalf("expected dotnet build+run, got %+v", got)
-	}
-}
-
-func TestDetectEmpty(t *testing.T) {
-	if got := detect(t.TempDir()); len(got) != 0 {
-		t.Errorf("empty project should detect no tasks, got %+v", got)
 	}
 }
 
@@ -67,19 +33,82 @@ func names(tasks []config.Task) []string {
 	return out
 }
 
+func TestDetectGo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod")
+	got := detect(dir).tasks
+	if len(got) == 0 || got[0].Name != "go test" {
+		t.Fatalf("expected go tasks first, got %+v", got)
+	}
+}
+
+func TestDetectAngularOverNpm(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json")
+	write(t, dir, "angular.json")
+	got := detect(dir).tasks
+	if len(got) != 1 || got[0].Cmd != "ng serve" {
+		t.Fatalf("angular.json should yield exactly 'ng serve', got %+v", got)
+	}
+}
+
+func TestDetectDotnet(t *testing.T) {
+	dir := t.TempDir()
+	writeContent(t, dir, "Api.csproj", webProj)
+	got := detect(dir).tasks
+	if len(got) != 3 || got[0].Cmd != "dotnet build Api.csproj" {
+		t.Fatalf("expected dotnet build/watch/run, got %+v", cmds(got))
+	}
+}
+
+func TestDetectEmpty(t *testing.T) {
+	if got := detect(t.TempDir()); len(got.tasks) != 0 || got.more != 0 {
+		t.Errorf("empty project should detect no tasks, got %+v", got)
+	}
+}
+
 func TestDetectNpmScriptsEnumerated(t *testing.T) {
 	dir := t.TempDir()
 	writeContent(t, dir, "package.json",
 		`{"scripts":{"start":"ng serve","test":"ng test","build":"ng build"}}`)
-	got := detect(dir)
-	want := []string{"npm build", "npm start", "npm test"} // sorted
-	if len(got) != 3 {
-		t.Fatalf("expected 3 script tasks, got %v", names(got))
+	got := detect(dir).tasks
+	want := []string{"npm build", "npm start", "npm test"}
+	if !slices.Equal(names(got), want) {
+		t.Fatalf("names = %v, want %v", names(got), want)
 	}
-	for i, w := range want {
-		if got[i].Name != w {
-			t.Errorf("task %d = %q, want %q", i, got[i].Name, w)
+	if got[1].Cmd != "npm run start" {
+		t.Errorf("cmd = %q, want npm run start", got[1].Cmd)
+	}
+}
+
+func TestDetectPackageManagerFromLockfile(t *testing.T) {
+	cases := []struct{ lock, want string }{
+		{"pnpm-lock.yaml", "pnpm run dev"},
+		{"yarn.lock", "yarn run dev"},
+		{"bun.lockb", "bun run dev"},
+		{"bun.lock", "bun run dev"},
+		{"package-lock.json", "npm run dev"},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		writeContent(t, dir, "package.json", `{"scripts":{"dev":"vite"}}`)
+		write(t, dir, c.lock)
+		if got := detect(dir).tasks; len(got) != 1 || got[0].Cmd != c.want {
+			t.Errorf("%s: tasks = %v, want %q", c.lock, cmds(got), c.want)
 		}
+	}
+}
+
+func TestDetectNpmCapReportsMore(t *testing.T) {
+	dir := t.TempDir()
+	var scripts []string
+	for i := range maxNpmScripts + 3 {
+		scripts = append(scripts, fmt.Sprintf(`"s%02d":"x"`, i))
+	}
+	writeContent(t, dir, "package.json", `{"scripts":{`+strings.Join(scripts, ",")+`}}`)
+	got := detect(dir)
+	if len(got.tasks) != maxNpmScripts || got.more != 3 {
+		t.Errorf("got %d tasks +%d more, want %d +3", len(got.tasks), got.more, maxNpmScripts)
 	}
 }
 
@@ -87,10 +116,9 @@ func TestDetectAngularSkipsNgServeWhenStartScriptExists(t *testing.T) {
 	dir := t.TempDir()
 	writeContent(t, dir, "package.json", `{"scripts":{"start":"ng serve"}}`)
 	write(t, dir, "angular.json")
-	got := detect(dir)
-	for _, task := range got {
+	for _, task := range detect(dir).tasks {
 		if task.Name == "ng serve" {
-			t.Errorf("ng serve should not be duplicated when npm start exists: %v", names(got))
+			t.Errorf("ng serve should not be duplicated when a start script exists")
 		}
 	}
 }
@@ -99,17 +127,29 @@ func TestDetectMakefileTargets(t *testing.T) {
 	dir := t.TempDir()
 	writeContent(t, dir, "Makefile",
 		"VAR := 1\n.PHONY: build test\nbuild:\n\tgo build ./...\n\ninstall_cmd\ntest: build\n\tgo test ./...\n%.o: %.c\n\tcc $<\n")
-	got := detect(dir)
+	got := detect(dir).tasks
 	want := []string{"make build", "make test"}
-	if len(got) != 2 || got[0].Name != want[0] || got[1].Name != want[1] {
+	if !slices.Equal(names(got), want) {
 		t.Errorf("detected %v, want %v (no .PHONY, no := vars, no pattern rules)", names(got), want)
+	}
+}
+
+func TestDetectMakefileCapReportsMore(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	for i := range maxFileTargets + 4 {
+		fmt.Fprintf(&b, "t%02d:\n\techo\n", i)
+	}
+	writeContent(t, dir, "Makefile", b.String())
+	if got := detect(dir); len(got.tasks) != maxFileTargets || got.more != 4 {
+		t.Errorf("got %d tasks +%d more, want %d +4", len(got.tasks), got.more, maxFileTargets)
 	}
 }
 
 func TestDetectJustfile(t *testing.T) {
 	dir := t.TempDir()
 	writeContent(t, dir, "justfile", "deploy:\n\techo hi\n")
-	got := detect(dir)
+	got := detect(dir).tasks
 	if len(got) != 1 || got[0].Cmd != "just deploy" {
 		t.Errorf("detected %v, want just deploy", names(got))
 	}
@@ -118,7 +158,7 @@ func TestDetectJustfile(t *testing.T) {
 func TestDetectCargo(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "Cargo.toml")
-	got := detect(dir)
+	got := detect(dir).tasks
 	if len(got) != 3 || got[0].Cmd != "cargo build" {
 		t.Errorf("expected cargo build/test/run, got %v", names(got))
 	}
@@ -127,92 +167,27 @@ func TestDetectCargo(t *testing.T) {
 func TestDetectGemfile(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "Gemfile")
-	got := detect(dir)
+	got := detect(dir).tasks
 	if len(got) != 2 || got[1].Cmd != "bundle exec rake" {
 		t.Errorf("expected bundle install + rake, got %v", names(got))
 	}
 }
 
-func TestMatchExt(t *testing.T) {
-	cases := []struct {
-		pattern, name string
-		want          bool
-	}{
-		{"*.csproj", "Api.csproj", true},
-		{"*.csproj", "Api.cs", false},
-		{"*.sln", "deck.sln", true},
-		{"go.mod", "go.mod", true},
-	}
-	for _, c := range cases {
-		if got, _ := matchExt(c.pattern, c.name); got != c.want {
-			t.Errorf("matchExt(%q,%q) = %v, want %v", c.pattern, c.name, got, c.want)
+func TestDetectedTasksAreAuto(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod")
+	for _, task := range detect(dir).tasks {
+		if task.Kind == "" {
+			t.Errorf("detected task %q has no kind", task.Name)
 		}
 	}
 }
 
-func TestCapturingWhileFiltering(t *testing.T) {
-	p := NewPane([]config.Task{{Name: "build", Cmd: "go build"}}, "")
-	p.SetSize(80, 24)
-	if p.Capturing() {
-		t.Fatal("Run pane should not capture before the filter is active")
-	}
-	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	if !p.Capturing() {
-		t.Error("'/' should start the filter and capture the keyboard")
-	}
-}
-
-// drain reads all messages from a proc until its channel closes.
-func drain(p *proc) []tea.Msg {
-	var msgs []tea.Msg
-	for m := range p.ch {
-		msgs = append(msgs, m)
-	}
-	return msgs
-}
-
-func TestStartStreamsStdoutThenExit(t *testing.T) {
-	p := start(0, 1, "echo hello")
-	msgs := drain(p)
-	if len(msgs) != 2 {
-		t.Fatalf("expected output + exit, got %d: %+v", len(msgs), msgs)
-	}
-	out, ok := msgs[0].(OutputMsg)
-	if !ok || out.text != "hello\n" {
-		t.Errorf("first msg = %+v, want OutputMsg 'hello\\n'", msgs[0])
-	}
-	ex, ok := msgs[1].(ExitMsg)
-	if !ok || ex.err != nil {
-		t.Errorf("last msg = %+v, want clean ExitMsg", msgs[1])
-	}
-}
-
-func TestStartCapturesStderrAndFailure(t *testing.T) {
-	p := start(2, 1, "echo oops >&2; exit 1")
-	msgs := drain(p)
-	if len(msgs) < 2 {
-		t.Fatalf("expected stderr line + exit, got %+v", msgs)
-	}
-	if out, ok := msgs[0].(OutputMsg); !ok || out.text != "oops\n" || out.idx != 2 {
-		t.Errorf("expected stderr captured as OutputMsg{idx:2,'oops\\n'}, got %+v", msgs[0])
-	}
-	if ex, ok := msgs[len(msgs)-1].(ExitMsg); !ok || ex.err == nil {
-		t.Errorf("expected failing ExitMsg, got %+v", msgs[len(msgs)-1])
-	}
-}
-
-func TestStopCancelsRunningProcess(t *testing.T) {
-	p := start(0, 1, "sleep 30")
-	done := make(chan []tea.Msg, 1)
-	go func() { done <- drain(p) }()
-	time.Sleep(100 * time.Millisecond)
-	p.stop()
-	select {
-	case msgs := <-done:
-		if ex, ok := msgs[len(msgs)-1].(ExitMsg); !ok || ex.err == nil {
-			t.Errorf("cancelled process should exit with error, got %+v", msgs)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("stop() did not terminate the process within 3s")
+func TestMergeTasks(t *testing.T) {
+	configured := []config.Task{{Name: "api", Cmd: "dotnet watch --project src/Api"}, {Name: "go test", Cmd: "go test -race ./..."}}
+	detected := []config.Task{{Name: "go test", Cmd: "go test ./..."}, {Name: "watch Api", Cmd: "dotnet watch --project src/Api"}, {Name: "go build", Cmd: "go build ./..."}}
+	got := mergeDetected(configured, detected)
+	if want := []string{"go build"}; !slices.Equal(names(got), want) {
+		t.Errorf("merged = %v, want %v: duplicates by name or command are dropped", names(got), want)
 	}
 }

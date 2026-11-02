@@ -111,11 +111,19 @@ func TestNoAITab(t *testing.T) {
 }
 
 func TestQDoesNotQuitWhileTypingInHTTP(t *testing.T) {
-	m := newModel()
-	atHTTP, _ := m.Update(keyMsg("4"))
-	_, cmd := atHTTP.(Model).Update(keyMsg("q"))
-	if isQuit(cmd) {
-		t.Error("'q' should be typed into the HTTP input, not quit, while on the HTTP tab")
+	inserting := update(t, newModel(), keyMsg("4"), keyMsg("i"))
+	if _, cmd := inserting.Update(keyMsg("q")); isQuit(cmd) {
+		t.Error("'q' should be typed into the HTTP input, not quit, in insert mode")
+	}
+}
+
+func TestHTTPNormalModeKeepsGlobalKeys(t *testing.T) {
+	atHTTP := update(t, newModel(), keyMsg("4"))
+	if _, cmd := atHTTP.Update(keyMsg("q")); !isQuit(cmd) {
+		t.Error("'q' should quit from HTTP normal mode")
+	}
+	if got := update(t, atHTTP, keyMsg("2")).active; got != tabGit {
+		t.Errorf("'2' from HTTP normal mode: active = %d, want tabGit", got)
 	}
 }
 
@@ -190,7 +198,7 @@ func TestHelpTogglesOnlyWhenNotCapturing(t *testing.T) {
 	if closed := update(t, opened, keyMsg("?")); closed.help.open {
 		t.Error("'?' again should close help")
 	}
-	if typed := update(t, m, keyMsg("4"), keyMsg("?")); typed.help.open {
+	if typed := update(t, m, keyMsg("4"), keyMsg("i"), keyMsg("?")); typed.help.open {
 		t.Error("'?' while the HTTP input is focused should not toggle help")
 	}
 }
