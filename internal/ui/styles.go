@@ -17,6 +17,9 @@ var (
 	ColorString = lipgloss.AdaptiveColor{Dark: "#50FA7B", Light: "#1A7F37"} // green
 	ColorMuted  = lipgloss.AdaptiveColor{Dark: "#6272A4", Light: "#57606A"} // comment blue-grey
 	ColorError  = lipgloss.AdaptiveColor{Dark: "#FF5555", Light: "#CF222E"} // red
+	ColorWarn   = lipgloss.AdaptiveColor{Dark: "#FFB86C", Light: "#9A6700"} // orange
+	ColorInfo   = lipgloss.AdaptiveColor{Dark: "#8BE9FD", Light: "#0969DA"} // cyan
+	ColorDim    = lipgloss.AdaptiveColor{Dark: "#44475A", Light: "#D0D7DE"} // current-line grey
 )
 
 var (
@@ -34,6 +37,9 @@ var (
 
 	// Muted is for secondary text (paths, hints, counts).
 	Muted = lipgloss.NewStyle().Foreground(ColorMuted)
+
+	// Dim draws an inactive backdrop, e.g. the body behind the help modal.
+	Dim = lipgloss.NewStyle().Foreground(ColorDim)
 
 	// Err styles error output.
 	Err = lipgloss.NewStyle().Foreground(ColorError)

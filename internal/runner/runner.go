@@ -20,6 +20,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"deck/internal/config"
+	"deck/internal/ui"
 )
 
 // OutputMsg carries one streamed line from a task. Exported so the root model
@@ -39,6 +40,10 @@ type ExitMsg struct {
 	gen int
 	err error
 }
+
+func (OutputMsg) RouteTo() ui.Dest { return ui.DestRun }
+
+func (ExitMsg) RouteTo() ui.Dest { return ui.DestRun }
 
 // proc is a running task's output channel and cancel handle.
 type proc struct {

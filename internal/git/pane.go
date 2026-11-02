@@ -32,8 +32,12 @@ type CommitMsgReady struct {
 	Err  error
 }
 
+func (CommitMsgReady) RouteTo() ui.Dest { return ui.DestGit }
+
 // RefreshMsg triggers a status reload.
 type RefreshMsg struct{}
+
+func (RefreshMsg) RouteTo() ui.Dest { return ui.DestGit }
 
 // Refresh is a command that reloads git status.
 func Refresh() tea.Msg { return RefreshMsg{} }
@@ -71,6 +75,7 @@ func (d branchDelegate) Render(w io.Writer, m list.Model, index int, item list.I
 type Pane struct {
 	changes    []Change
 	cursor     int
+	offset     int
 	diff       viewport.Model
 	branch     string
 	committing bool
@@ -126,17 +131,48 @@ func NewPane(theme string, commitAI bool) Pane {
 	return p
 }
 
-// SetSize lays out the change list and diff viewport.
+// SetSize sets the pane's outer box: the change list plus the bordered diff.
 func (p *Pane) SetSize(w, h int) {
 	p.width, p.height = w, h
-	listW := w / 3
-	if listW < 24 {
-		listW = 24
+	innerW := max(w-p.listWidth()-4, 0)
+	p.diff.Width = innerW
+	p.diff.Height = max(h-2, 0)
+	p.commitBox.Width = max(innerW-lipgloss.Width(commitPrompt)-1, 1)
+	p.branchList.SetSize(innerW, max(h-4, 0))
+	p.offset = p.scrollOffset()
+}
+
+func (p Pane) listWidth() int { return max(p.width/3, 24) }
+
+func (p Pane) listHeader() []string {
+	head := []string{ui.Active.Render(ui.FitWidth("⎇ "+p.branch, p.listWidth()-1, "…")), ""}
+	if p.err != nil {
+		head = append(head, ui.Err.Render(p.err.Error()))
 	}
-	p.diff.Width = w - listW - 4
-	p.diff.Height = h - 3
-	p.commitBox.Width = w - 6
-	p.branchList.SetSize(w-listW-4, h-4)
+	return head
+}
+
+func (p Pane) listFooter() []string {
+	if p.status == "" {
+		return nil
+	}
+	return []string{"", ui.Muted.Render(ui.FitWidth(p.status, p.listWidth()-1, "…"))}
+}
+
+func (p Pane) changeRows() int {
+	return max(p.height-len(p.listHeader())-len(p.listFooter()), 1)
+}
+
+// scrollOffset keeps the cursor row inside the visible window of change rows.
+func (p Pane) scrollOffset() int {
+	rows, off := p.changeRows(), p.offset
+	if p.cursor < off {
+		off = p.cursor
+	}
+	if p.cursor >= off+rows {
+		off = p.cursor - rows + 1
+	}
+	return max(min(off, len(p.changes)-rows), 0)
 }
 
 const commitPrompt = "✎ "
@@ -233,12 +269,18 @@ func (p *Pane) selected() (Change, bool) {
 
 // Update handles staging, committing, branch switching, and diff scrolling.
 func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
+	p, cmd := p.update(msg)
+	p.offset = p.scrollOffset()
+	return p, cmd
+}
+
+func (p Pane) update(msg tea.Msg) (Pane, tea.Cmd) {
 	switch msg := msg.(type) {
 	case RefreshMsg:
 		p.reload()
 		return p, nil
 	case CommitMsgReady:
-		return p.commitMsgReady(msg), nil
+		return p.commitMsgReady(msg)
 	case spinner.TickMsg:
 		if !p.generating {
 			return p, nil
@@ -428,20 +470,20 @@ func (p *Pane) stopGenerating() {
 	}
 }
 
-func (p Pane) commitMsgReady(msg CommitMsgReady) Pane {
+func (p Pane) commitMsgReady(msg CommitMsgReady) (Pane, tea.Cmd) {
 	if errors.Is(msg.Err, context.Canceled) {
-		return p
+		return p, nil
 	}
 	p.stopGenerating()
 	if msg.Err != nil {
 		p.status = "AI commit message failed: " + msg.Err.Error()
-		return p
+		return p, ui.Toast(ui.LevelError, p.status)
 	}
 	p.status = ""
 	if p.committing {
 		p.commitBox.SetValue(strings.TrimSpace(msg.Text))
 	}
-	return p
+	return p, nil
 }
 
 // backToEdit returns from the confirm step to the (still-populated) edit box.
@@ -481,37 +523,33 @@ func (p *Pane) toggleStage() {
 	p.reload()
 }
 
-// View renders the change list, diff, and (when active) the commit box.
+// View renders the change list, diff, and (when active) the commit box, filling
+// exactly the box given to SetSize.
 func (p Pane) View() string {
-	listW := p.width / 3
-	if listW < 24 {
-		listW = 24
-	}
-	var b strings.Builder
-	b.WriteString(ui.Active.Render("⎇ "+p.branch) + "\n\n")
-	if p.err != nil {
-		b.WriteString(ui.Err.Render(p.err.Error()) + "\n")
-	}
+	listW := p.listWidth()
+	rows := p.changeRows()
+	lines := p.listHeader()
 	if len(p.changes) == 0 {
-		b.WriteString(ui.Muted.Render("working tree clean"))
+		lines = append(lines, ui.Muted.Render("working tree clean"))
 	}
-	for i, c := range p.changes {
-		mark := c.Staged + c.Unstaged
-		line := mark + " " + c.Path
+	end := min(p.offset+rows, len(p.changes))
+	for i := p.offset; i < end; i++ {
+		c := p.changes[i]
+		line := ui.FitWidth(c.Staged+c.Unstaged+" "+c.Path, listW-3, "…")
 		switch {
 		case i == p.cursor:
-			b.WriteString(ui.Active.Render("› " + line))
+			lines = append(lines, ui.Active.Render("› "+line))
 		case c.IsStaged():
-			b.WriteString("  " + lipgloss.NewStyle().Foreground(ui.ColorString).Render(line))
+			lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ui.ColorString).Render(line))
 		default:
-			b.WriteString("  " + line)
+			lines = append(lines, "  "+line)
 		}
-		b.WriteString("\n")
 	}
-	if p.status != "" {
-		b.WriteString("\n" + ui.Muted.Render(p.status))
+	left := strings.Join(lines, "\n")
+	if footer := p.listFooter(); footer != nil {
+		left = ui.Fit(left, listW, p.height-len(footer)) + "\n" + strings.Join(footer, "\n")
 	}
-	left := lipgloss.NewStyle().Width(listW).Height(p.height).Render(b.String())
+	left = ui.Fit(left, listW, p.height)
 	right := p.diff.View()
 	switch {
 	case p.branching:
@@ -523,7 +561,8 @@ func (p Pane) View() string {
 	case p.committing:
 		right = p.commitBoxView() + "\n" + p.diff.View()
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, ui.Pane.Render(right))
+	right = ui.Pane.Render(ui.Fit(right, p.diff.Width, p.diff.Height))
+	return ui.Fit(lipgloss.JoinHorizontal(lipgloss.Top, left, right), p.width, p.height)
 }
 
 func (p Pane) commitBoxView() string {

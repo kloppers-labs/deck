@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/config"
 	"deck/internal/git"
+	"deck/internal/httpc"
 	"deck/internal/ui"
 )
 
@@ -18,9 +20,31 @@ func keyMsg(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case "shift+tab":
 		return tea.KeyMsg{Type: tea.KeyShiftTab}
-	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "f1":
+		return tea.KeyMsg{Type: tea.KeyF1}
 	}
+	if rest, ok := strings.CutPrefix(s, "alt+"); ok {
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(rest), Alt: true}
+	}
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+func update(t *testing.T, m Model, msgs ...tea.Msg) Model {
+	t.Helper()
+	for _, msg := range msgs {
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	}
+	return m
+}
+
+func sized(t *testing.T, w, h int) Model {
+	t.Helper()
+	return update(t, newModel(), tea.WindowSizeMsg{Width: w, Height: h})
 }
 
 func isQuit(cmd tea.Cmd) bool {
@@ -31,7 +55,7 @@ func isQuit(cmd tea.Cmd) bool {
 	return ok
 }
 
-func newModel() Model { return New(config.Default()) }
+func newModel() Model { return New(config.Default(), nil) }
 
 func TestQuitOnFilesTab(t *testing.T) {
 	m := newModel()
@@ -100,14 +124,14 @@ func TestCtrlCAlwaysQuits(t *testing.T) {
 	}
 }
 
-func TestStatusLine(t *testing.T) {
-	got := statusLine("deck", "main", 3, 2)
+func TestStatusLeft(t *testing.T) {
+	got := strings.Join(statusLeft("deck", "main", 3, 2), " · ")
 	want := "deck · ⎇ main · 3 dirty · ▶ 2 running"
 	if got != want {
-		t.Errorf("statusLine = %q, want %q", got, want)
+		t.Errorf("statusLeft = %q, want %q", got, want)
 	}
-	if got := statusLine("deck", "", 0, 0); got != "deck" {
-		t.Errorf("minimal statusLine = %q, want just the project", got)
+	if got := statusLeft("deck", "", 0, 0); len(got) != 1 || got[0] != "deck" {
+		t.Errorf("minimal statusLeft = %q, want just the project", got)
 	}
 }
 
@@ -129,7 +153,7 @@ func TestEditorCloseRefreshesGitWhileOnFiles(t *testing.T) {
 }
 
 func TestCommitMsgReadyReachesGitFromAnotherTab(t *testing.T) {
-	m := newModel()
+	m := sized(t, 120, 30)
 	atRun, _ := m.Update(keyMsg("3"))
 	next, _ := atRun.(Model).Update(git.CommitMsgReady{Err: errors.New("boom")})
 	if v := next.(Model).git.View(); !strings.Contains(v, "boom") {
@@ -155,19 +179,81 @@ func TestViewIsSanitized(t *testing.T) {
 }
 
 func TestHelpTogglesOnlyWhenNotCapturing(t *testing.T) {
-	m := newModel() // starts on Files, which does not capture
-	opened, _ := m.Update(keyMsg("?"))
-	if !opened.(Model).showHelp {
-		t.Error("'?' on a non-capturing tab should open full help")
+	m := newModel()
+	opened := update(t, m, keyMsg("?"))
+	if !opened.help.open {
+		t.Error("'?' on a non-capturing tab should open help")
 	}
-	closed, _ := opened.(Model).Update(keyMsg("?"))
-	if closed.(Model).showHelp {
-		t.Error("'?' again should close full help")
+	if closed := update(t, opened, keyMsg("?")); closed.help.open {
+		t.Error("'?' again should close help")
 	}
-
-	atHTTP, _ := m.Update(keyMsg("4"))
-	typed, _ := atHTTP.(Model).Update(keyMsg("?"))
-	if typed.(Model).showHelp {
+	if typed := update(t, m, keyMsg("4"), keyMsg("?")); typed.help.open {
 		t.Error("'?' while the HTTP input is focused should not toggle help")
+	}
+}
+
+func TestAsyncRoutedWhileOtherTabActive(t *testing.T) {
+	cases := []struct {
+		name  string
+		onTab string
+		msg   tea.Msg
+		dest  ui.Dest
+		check func(Model) bool
+	}{
+		{"git refresh", "1", git.RefreshMsg{}, ui.DestGit,
+			func(m Model) bool { return m.git.Reloads() == newModel().git.Reloads()+1 }},
+		{"commit message", "3", git.CommitMsgReady{Err: errors.New("routed-boom")}, ui.DestGit,
+			func(m Model) bool { return strings.Contains(ansi.Strip(m.git.View()), "routed-boom") }},
+		{"http response", "1", httpc.RespMsg{}, ui.DestHTTP,
+			func(m Model) bool { return strings.Contains(ansi.Strip(m.httpc.View()), "0 bytes") }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.msg.(ui.Routed).RouteTo(); got != c.dest {
+				t.Fatalf("RouteTo = %v, want %v", got, c.dest)
+			}
+			m := update(t, sized(t, 120, 30), keyMsg(c.onTab), c.msg)
+			if !c.check(m) {
+				t.Errorf("%T did not reach its pane while another tab was active", c.msg)
+			}
+		})
+	}
+}
+
+func TestRunnerOutputRoutedWhileOtherTabActive(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tasks = []config.Task{{Name: "echo", Cmd: "echo routed-output"}}
+	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"))
+	next, cmd := m.Update(keyMsg("enter"))
+	m = next.(Model)
+	var out tea.Msg
+	for _, msg := range collect(cmd) {
+		if r, ok := msg.(ui.Routed); ok && r.RouteTo() == ui.DestRun {
+			out = msg
+		}
+	}
+	if out == nil {
+		t.Fatal("running a task should stream a routed output message")
+	}
+	m = update(t, m, keyMsg("1"))
+	next, cmd = m.Update(out)
+	m = next.(Model)
+	if !strings.Contains(ansi.Strip(m.run.View()), "routed-output") {
+		t.Fatal("runner output did not reach the Run pane while Files was active")
+	}
+	var exit tea.Msg
+	for exit == nil && cmd != nil {
+		msg := cmd()
+		if msg == nil {
+			break
+		}
+		next, cmd = m.Update(msg)
+		m = next.(Model)
+		if r, ok := msg.(ui.Routed); ok && r.RouteTo() == ui.DestRun && m.run.RunningCount() == 0 {
+			exit = msg
+		}
+	}
+	if exit == nil || m.run.RunningCount() != 0 {
+		t.Error("the task's exit did not reach the Run pane while Files was active")
 	}
 }

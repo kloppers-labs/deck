@@ -81,14 +81,17 @@ func TestFocusToggle(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(dir, "dracula")
-	m.SetSize(80, 24) // give the list a usable page size for cursor movement
+	m.SetSize(80, 24)
 	if m.Capturing() {
 		t.Fatal("new pane should start in list focus, not capturing")
 	}
 
 	m, _ = m.Update(keyMsg("f"))
-	if !m.Capturing() {
-		t.Fatal("pressing f should focus the preview (capturing)")
+	if m.focus != focusPreview {
+		t.Fatal("pressing f should focus the preview")
+	}
+	if m.Capturing() {
+		t.Fatal("reading the preview must not capture the keyboard")
 	}
 
 	startCursor := m.list.Index()
@@ -98,7 +101,7 @@ func TestFocusToggle(t *testing.T) {
 	}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.Capturing() {
+	if m.focus != focusList {
 		t.Fatal("esc should return focus to the list")
 	}
 
