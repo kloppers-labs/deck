@@ -338,6 +338,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		m.hover.due = true
 		return m, StatCmd(m.hover.path, m.hover.seq, m.metas)
+	case InvalidateMsg:
+		return m.invalidate(msg.Saved)
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:
