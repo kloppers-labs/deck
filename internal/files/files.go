@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"deck/internal/httpc"
 	"deck/internal/ui"
 )
 
@@ -274,6 +275,10 @@ func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		m.dir = filepath.Dir(m.dir)
 		m.load()
 		return m, nil, true
+	case "x":
+		if e, ok := m.selected(); ok && !e.isDir && strings.EqualFold(filepath.Ext(e.name), ".http") {
+			return m, httpc.LoadRequest(filepath.Join(m.dir, e.name), 0), true
+		}
 	}
 	return m, nil, false
 }
@@ -342,6 +347,7 @@ func (m Model) HelpBindings() []key.Binding {
 		key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "up dir")),
 		key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "focus preview")),
+		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "send .http to HTTP")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list")),
 	}
 }
