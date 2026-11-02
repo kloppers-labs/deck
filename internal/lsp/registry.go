@@ -21,6 +21,7 @@ type ServerSpec struct {
 	Solution        string
 	Enabled         bool
 	InstallHint     string
+	NeedsTypeScript bool
 	Settings        map[string]any
 }
 
@@ -64,12 +65,13 @@ func DefaultSpecs() []ServerSpec {
 			InstallHint: "go install golang.org/x/tools/gopls@latest",
 		},
 		{
-			Name:        "typescript",
-			Command:     []string{"typescript-language-server", "--stdio"},
-			Extensions:  []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"},
-			RootMarkers: []string{"tsconfig.json", "jsconfig.json", "package.json"},
-			Enabled:     true,
-			InstallHint: "npm install --global typescript-language-server typescript",
+			Name:            "typescript",
+			Command:         []string{"typescript-language-server", "--stdio"},
+			Extensions:      []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"},
+			RootMarkers:     []string{"tsconfig.json", "jsconfig.json", "package.json"},
+			Enabled:         true,
+			InstallHint:     "npm install --global typescript-language-server typescript",
+			NeedsTypeScript: true,
 		},
 	}
 }
@@ -165,11 +167,12 @@ type MissingBinaryError struct {
 func (e *MissingBinaryError) Error() string { return e.Binary + " not found" }
 
 type Resolved struct {
-	Spec       ServerSpec
-	Root       string
-	Binary     string
-	Args       []string
-	LanguageID string
+	Spec        ServerSpec
+	Root        string
+	Binary      string
+	Args        []string
+	LanguageID  string
+	InitOptions any
 }
 
 type Registry struct {
@@ -296,6 +299,15 @@ func (r *Registry) resolveIn(spec ServerSpec, dir string) (Resolved, error) {
 	res.Args = slices.Clone(spec.Command[1:])
 	if spec.SolutionFlag != "" && isSolution(match) {
 		res.Args = append(res.Args, spec.SolutionFlag, match)
+	}
+	if spec.NeedsTypeScript {
+		ts, local := FindTSServer(res.Root, bin)
+		if ts == "" {
+			return res, &MissingBinaryError{Server: spec.Name, Binary: "typescript", Hint: TSInstallHint}
+		}
+		if !local {
+			res.InitOptions = map[string]any{"tsserver": map[string]any{"fallbackPath": ts}}
+		}
 	}
 	return res, nil
 }

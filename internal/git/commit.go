@@ -30,7 +30,7 @@ func (p Pane) openCommit() (Pane, tea.Cmd) {
 	p.committing = true
 	p.focus = focusList
 	if sectionCounts(p.items)[SectionStaged] == 0 {
-		p.setStatus("nothing staged: alt+a amends the last commit", false)
+		p.setStatus("nothing staged: "+ui.Alt("a")+" amends the last commit", false)
 	}
 	return p, p.box.Focus()
 }
@@ -217,9 +217,9 @@ func (p Pane) commitView() string {
 	if p.generating {
 		title += "  " + p.spin.View() + "generating…"
 	}
-	hint := "ctrl+s commit · alt+a amend · esc cancel"
+	hint := "ctrl+s commit · " + ui.Alt("a") + " amend · esc cancel"
 	if p.opts.CommitAI {
-		hint = "ctrl+s commit · alt+a amend · ctrl+g AI · esc cancel"
+		hint = "ctrl+s commit · " + ui.Alt("a") + " amend · ctrl+g AI · esc cancel"
 	}
 	parts := []string{title, p.box.View()}
 	if p.confirming {

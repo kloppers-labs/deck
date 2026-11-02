@@ -169,7 +169,7 @@ func TestBinaryFallbackDirs(t *testing.T) {
 
 func TestResolveLanguageID(t *testing.T) {
 	repo := realTemp(t)
-	touch(t, filepath.Join(repo, ".git", "HEAD"), filepath.Join(repo, "tsconfig.json"), filepath.Join(repo, "go.mod"))
+	touch(t, filepath.Join(repo, ".git", "HEAD"), filepath.Join(repo, "tsconfig.json"), filepath.Join(repo, "go.mod"), filepath.Join(repo, tsserverRel))
 	r := NewRegistry(DefaultSpecs(), Env{LookPath: func(n string) (string, error) { return "/bin/" + n, nil }, Home: repo})
 	for file, want := range map[string]string{
 		"app.tsx": "typescriptreact", "app.ts": "typescript", "a.jsx": "javascriptreact",

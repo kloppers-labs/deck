@@ -19,10 +19,12 @@ type MissingServer struct {
 }
 
 type microServer struct {
-	Name      string
-	Cmd       string
-	Args      []string
-	Filetypes []string
+	Name         string
+	Cmd          string
+	Args         []string
+	Filetypes    []string
+	TSServer     string
+	RequireLocal string
 }
 
 var microFiletypes = map[string][]string{
@@ -75,7 +77,16 @@ func RenderZDeck(specs []lsp.ServerSpec, lookup func(string) (string, error)) ([
 		if !ok {
 			fts = []string{s.Name}
 		}
-		servers = append(servers, microServer{Name: s.Name, Cmd: bin, Args: args, Filetypes: fts})
+		ms := microServer{Name: s.Name, Cmd: bin, Args: args, Filetypes: fts}
+		if s.NeedsTypeScript {
+			if ts, _ := lsp.FindTSServer("", bin); ts != "" {
+				ms.TSServer = ts
+			} else {
+				ms.RequireLocal = "node_modules/typescript/lib/tsserver.js"
+				missing = append(missing, MissingServer{Server: s.Name, Binary: "typescript", Hint: lsp.TSInstallHint})
+			}
+		}
+		servers = append(servers, ms)
 	}
 	var buf bytes.Buffer
 	if err := zDeckTemplate.Execute(&buf, servers); err != nil {

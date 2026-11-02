@@ -661,7 +661,7 @@ var (
 	bindYes      = key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "confirm"))
 	bindNo       = key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "cancel"))
 	bindSave     = key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "commit"))
-	bindAmend    = key.NewBinding(key.WithKeys("alt+a"), key.WithHelp("alt+a", "amend"))
+	bindAmend    = key.NewBinding(key.WithKeys("alt+a"), key.WithHelp(ui.Alt("a"), "amend"))
 	bindAI       = key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "AI msg"))
 	bindCancel   = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel"))
 	bindSwitch   = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "switch"))

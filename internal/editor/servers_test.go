@@ -108,3 +108,49 @@ func TestSpecsFromConfig(t *testing.T) {
 		t.Error("untouched servers keep their defaults")
 	}
 }
+
+func tsSpecs() []lsp.ServerSpec {
+	var out []lsp.ServerSpec
+	for _, s := range lsp.DefaultSpecs() {
+		if s.NeedsTypeScript {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func TestZDeckTypeScriptUsesGlobalInstall(t *testing.T) {
+	prefix := t.TempDir()
+	bin := filepath.Join(prefix, "node_modules", "typescript-language-server", "lib", "cli.mjs")
+	ts := filepath.Join(prefix, "node_modules", "typescript", "lib", "tsserver.js")
+	for _, p := range []string{bin, ts} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, missing := RenderZDeck(tsSpecs(), fakeLookup(map[string]string{"typescript-language-server": bin}))
+	realTS, _ := filepath.EvalSymlinks(ts)
+	if !strings.Contains(string(got), "fallbackPath = "+luaString(realTS)) || strings.Contains(string(got), `deckRequires = "`) {
+		t.Errorf("want a tsserver fallback and no local requirement:\n%s", got)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %+v, want none", missing)
+	}
+}
+
+func TestZDeckTypeScriptWithoutInstallNeedsProjectCopy(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "typescript-language-server")
+	if ts, _ := lsp.FindTSServer("", bin); ts != "" {
+		t.Skipf("machine has a global TypeScript at %s", ts)
+	}
+	got, missing := RenderZDeck(tsSpecs(), fakeLookup(map[string]string{"typescript-language-server": bin}))
+	if !strings.Contains(string(got), `deckRequires = "node_modules/typescript/lib/tsserver.js"`) {
+		t.Errorf("want autostart gated on a project TypeScript:\n%s", got)
+	}
+	if len(missing) != 1 || missing[0].Binary != "typescript" || missing[0].Hint != lsp.TSInstallHint {
+		t.Errorf("missing = %+v, want typescript with its install hint", missing)
+	}
+}

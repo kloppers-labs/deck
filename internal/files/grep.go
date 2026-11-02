@@ -549,7 +549,7 @@ func (g grepState) status() string {
 func (m *Model) openGrep() tea.Cmd {
 	m.openPicker(picker.Options{
 		ID: pickGrep, Dest: ui.DestFiles, Title: "Grep", Live: true,
-		Placeholder: "text to find (alt+r regex · alt+c case · alt+g glob)",
+		Placeholder: "text to find (" + ui.Alt("r") + " regex · " + ui.Alt("c") + " case · " + ui.Alt("g") + " glob)",
 	})
 	m.grep.state = ""
 	m.pick.SetStatus(m.grep.status())

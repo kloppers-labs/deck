@@ -98,7 +98,11 @@ func Sync(dir, microVersion string, o SyncOptions) (SyncResult, error) {
 		"settings.json": DefaultSettings(f),
 		"bindings.json": DefaultBindings(f),
 	} {
-		if _, err := MergeJSON(filepath.Join(dir, name), defaults); err != nil {
+		stale := map[string]map[string]bool(nil)
+		if name == "settings.json" {
+			stale = staleSettings()
+		}
+		if _, err := mergeJSON(filepath.Join(dir, name), defaults, stale); err != nil {
 			res.Warnings = append(res.Warnings, err.Error())
 		}
 	}

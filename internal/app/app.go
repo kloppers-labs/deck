@@ -542,7 +542,7 @@ func (m Model) paneBindings() []key.Binding {
 	return nil
 }
 
-var mouseOffHint = key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("alt+m", "mouse off"))
+var mouseOffHint = key.NewBinding(key.WithKeys("alt+m"), key.WithHelp(ui.Alt("m"), "mouse off"))
 
 var quitFooter = []key.Binding{
 	key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "stop tasks and quit")),

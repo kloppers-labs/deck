@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"deck/internal/ui"
 )
 
 func readJSON(t *testing.T, path string) map[string]any {
@@ -20,6 +22,17 @@ func readJSON(t *testing.T, path string) map[string]any {
 		t.Fatalf("%s: %v", path, err)
 	}
 	return m
+}
+
+func writeJSON(t *testing.T, path string, v map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMergeAddsMissingOnly(t *testing.T) {
@@ -111,7 +124,7 @@ func TestSettingsFollowFeatures(t *testing.T) {
 	if l, _ := full["statusformatl"].(string); !strings.Contains(l, "$(status.branch)") || !strings.Contains(l, "lsp:$(mlsp.status)") {
 		t.Errorf("statusformatl = %q", l)
 	}
-	if r := full["statusformatr"]; r != "Alt-q deck · Alt-t tree · Ctrl-p files · Alt-k hover · F12 def" {
+	if r, want := full["statusformatr"], ui.Alt("q")+" deck · "+ui.Alt("t")+" tree · Ctrl-p files · "+ui.Alt("k")+" hover · F12 def"; r != want {
 		t.Errorf("statusformatr = %q", r)
 	}
 	bare := DefaultSettings(Features{})
@@ -121,7 +134,31 @@ func TestSettingsFollowFeatures(t *testing.T) {
 	if l, _ := bare["statusformatl"].(string); strings.Contains(l, "mlsp") {
 		t.Errorf("statusformatl without mlsp = %q", l)
 	}
-	if r := bare["statusformatr"]; r != "Alt-q deck · Alt-t tree" {
+	if r, want := bare["statusformatr"], ui.Alt("q")+" deck · "+ui.Alt("t")+" tree"; r != want {
 		t.Errorf("statusformatr without tools = %q", r)
+	}
+}
+
+func TestSyncReplacesStaleStatusHintsOnly(t *testing.T) {
+	if ui.Alt("q") == "Alt-q" {
+		t.Skip("labels unchanged on this platform")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	f := Features{LSP: true, Omni: true}
+	writeJSON(t, path, map[string]any{"statusformatr": "Alt-q deck · Alt-t tree · Ctrl-p files · Alt-k hover · F12 def"})
+	if _, err := mergeJSON(path, DefaultSettings(f), staleSettings()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readJSON(t, path)["statusformatr"]; got != statusHints(f, ui.Alt) {
+		t.Errorf("stale deck hints should be replaced, got %q", got)
+	}
+
+	writeJSON(t, path, map[string]any{"statusformatr": "my own status"})
+	if _, err := mergeJSON(path, DefaultSettings(f), staleSettings()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readJSON(t, path)["statusformatr"]; got != "my own status" {
+		t.Errorf("a user's own status line must be kept, got %q", got)
 	}
 }

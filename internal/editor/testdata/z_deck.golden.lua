@@ -39,11 +39,27 @@ local deckServers = {
     },
 }
 
+local deckOS = import("os")
+local deckPath = import("path/filepath")
+
+local function deckFoundAbove(rel)
+    local dir = deckOS.Getwd()
+    while dir ~= nil and dir ~= "" do
+        local _, err = deckOS.Stat(deckPath.Join(dir, rel))
+        if err == nil then return true end
+        local parent = deckPath.Dir(dir)
+        if parent == dir then return false end
+        dir = parent
+    end
+    return false
+end
+
 settings.autostart = {}
 for _, server in ipairs(deckServers) do
     languageServer["deck-" .. server.shortName] = server
+    local usable = server.deckRequires == nil or deckFoundAbove(server.deckRequires)
     for _, ft in ipairs(server.filetypes) do
-        settings.autostart[ft] = { server }
+        if usable then settings.autostart[ft] = { server } end
         settings.defaultLanguageServer[ft] = server
     end
 end

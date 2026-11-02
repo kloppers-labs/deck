@@ -801,9 +801,9 @@ var (
 		key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "tree")),
 	}
 	grepToggles = []key.Binding{
-		key.NewBinding(key.WithKeys("alt+r"), key.WithHelp("alt+r", "regex")),
-		key.NewBinding(key.WithKeys("alt+c"), key.WithHelp("alt+c", "case")),
-		key.NewBinding(key.WithKeys("alt+g"), key.WithHelp("alt+g", "glob (last word)")),
+		key.NewBinding(key.WithKeys("alt+r"), key.WithHelp(ui.Alt("r"), "regex")),
+		key.NewBinding(key.WithKeys("alt+c"), key.WithHelp(ui.Alt("c"), "case")),
+		key.NewBinding(key.WithKeys("alt+g"), key.WithHelp(ui.Alt("g"), "glob (last word)")),
 	}
 	promptBindings = []key.Binding{
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),

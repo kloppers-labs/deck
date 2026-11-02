@@ -52,19 +52,19 @@ var Keys = KeyMap{
 	),
 	AltFiles: key.NewBinding(
 		key.WithKeys("alt+1"),
-		key.WithHelp("alt+1", "files (while typing)"),
+		key.WithHelp(Alt("1"), "files (while typing)"),
 	),
 	AltGit: key.NewBinding(
 		key.WithKeys("alt+2"),
-		key.WithHelp("alt+2", "git (while typing)"),
+		key.WithHelp(Alt("2"), "git (while typing)"),
 	),
 	AltRun: key.NewBinding(
 		key.WithKeys("alt+3"),
-		key.WithHelp("alt+3", "run (while typing)"),
+		key.WithHelp(Alt("3"), "run (while typing)"),
 	),
 	AltHTTP: key.NewBinding(
 		key.WithKeys("alt+4"),
-		key.WithHelp("alt+4", "http (while typing)"),
+		key.WithHelp(Alt("4"), "http (while typing)"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q"),
@@ -84,7 +84,7 @@ var Keys = KeyMap{
 	),
 	ToggleMouse: key.NewBinding(
 		key.WithKeys("alt+m"),
-		key.WithHelp("alt+m", "toggle mouse"),
+		key.WithHelp(Alt("m"), "toggle mouse"),
 	),
 	Rerun: key.NewBinding(
 		key.WithKeys("ctrl+r"),

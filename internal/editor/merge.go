@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"deck/internal/ui"
 )
 
 // ErrUnparseable marks a micro JSON file deck can't read (micro allows comments); it is left untouched.
@@ -39,15 +41,31 @@ func DefaultSettings(f Features) map[string]any {
 	if f.LSP {
 		out["statusformatl"] = baseStatusL + lspStatusL
 	}
-	hints := []string{"Alt-q deck", "Alt-t tree"}
+	out["statusformatr"] = statusHints(f, ui.Alt)
+	return out
+}
+
+func statusHints(f Features, alt func(string) string) string {
+	hints := []string{alt("q") + " deck", alt("t") + " tree"}
 	if f.Omni {
 		hints = append(hints, "Ctrl-p files")
 	}
 	if f.LSP {
-		hints = append(hints, "Alt-k hover", "F12 def")
+		hints = append(hints, alt("k")+" hover", "F12 def")
 	}
-	out["statusformatr"] = strings.Join(hints, " · ")
-	return out
+	return strings.Join(hints, " · ")
+}
+
+// staleSettings maps settings to values earlier deck versions wrote, so a sync may replace them.
+func staleSettings() map[string]map[string]bool {
+	legacyAlt := func(k string) string { return "Alt-" + k }
+	hints := map[string]bool{}
+	for _, f := range []Features{{}, {LSP: true}, {Omni: true}, {LSP: true, Omni: true}} {
+		if old := statusHints(f, legacyAlt); old != statusHints(f, ui.Alt) {
+			hints[old] = true
+		}
+	}
+	return map[string]map[string]bool{"statusformatr": hints}
 }
 
 // DefaultBindings are deck's micro key bindings, minus those whose plugin isn't installed.
@@ -78,6 +96,11 @@ func embeddedJSON(name string) map[string]any {
 
 // MergeJSON adds the keys of defaults that path lacks, never changing an existing value.
 func MergeJSON(path string, defaults map[string]any) (bool, error) {
+	return mergeJSON(path, defaults, nil)
+}
+
+// mergeJSON is MergeJSON that also replaces a value listed in stale for its key.
+func mergeJSON(path string, defaults map[string]any, stale map[string]map[string]bool) (bool, error) {
 	current := map[string]any{}
 	data, err := os.ReadFile(path)
 	switch {
@@ -96,7 +119,9 @@ func MergeJSON(path string, defaults map[string]any) (bool, error) {
 	}
 	changed := false
 	for k, v := range defaults {
-		if _, ok := current[k]; !ok {
+		cur, ok := current[k]
+		old, isString := cur.(string)
+		if !ok || (isString && stale[k][old] && cur != v) {
 			current[k] = v
 			changed = true
 		}

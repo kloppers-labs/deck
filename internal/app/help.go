@@ -43,7 +43,7 @@ var mouseHelp = []key.Binding{
 	key.NewBinding(key.WithHelp("double-click", "open")),
 	key.NewBinding(key.WithHelp("wheel", "scroll what is under the pointer")),
 	key.NewBinding(key.WithHelp("shift+drag", "select text (option+drag in iTerm2)")),
-	key.NewBinding(key.WithHelp("alt+m", "toggle mouse capture")),
+	key.NewBinding(key.WithHelp(ui.Alt("m"), "toggle mouse capture")),
 }
 
 func (m *Model) openHelp() {

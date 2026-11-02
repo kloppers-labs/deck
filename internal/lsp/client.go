@@ -257,11 +257,12 @@ func (c *Client) readyTimeout(gen int) {
 func (c *Client) initializeParams() InitializeParams {
 	root := PathToURI(c.res.Root)
 	return InitializeParams{
-		ProcessID:        os.Getpid(),
-		ClientInfo:       ClientInfo{Name: "deck"},
-		RootURI:          root,
-		RootPath:         c.res.Root,
-		WorkspaceFolders: []WorkspaceFolder{{URI: root, Name: filepath.Base(c.res.Root)}},
+		ProcessID:             os.Getpid(),
+		ClientInfo:            ClientInfo{Name: "deck"},
+		RootURI:               root,
+		RootPath:              c.res.Root,
+		WorkspaceFolders:      []WorkspaceFolder{{URI: root, Name: filepath.Base(c.res.Root)}},
+		InitializationOptions: c.res.InitOptions,
 		Capabilities: map[string]any{
 			"general": map[string]any{"positionEncodings": []Encoding{UTF8, UTF16}},
 			"textDocument": map[string]any{
