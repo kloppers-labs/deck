@@ -94,12 +94,16 @@ func New(cfg config.Config, warnings []config.Warning) Model {
 		warnings: warnings,
 		project:  projectName(),
 		files:    files.New("", cfg),
-		git:      git.NewPane(cfg.Theme, aicommit.Available(cfg.AIBackend)),
-		run:      runner.NewPane(cfg.Tasks, ""),
-		httpc:    httpc.NewPane(cfg.Theme),
-		keyHelp:  newKeyHelp(),
-		help:     newHelpState(),
-		mouseOn:  cfg.Mouse != "off",
+		git: git.NewPane(git.Options{
+			Theme:         cfg.Theme,
+			CommitAI:      aicommit.Available(cfg.AIBackend),
+			ConfirmCommit: cfg.Git.ConfirmCommit,
+		}),
+		run:     runner.NewPane(cfg.Tasks, ""),
+		httpc:   httpc.NewPane(cfg.Theme),
+		keyHelp: newKeyHelp(),
+		help:    newHelpState(),
+		mouseOn: cfg.Mouse != "off",
 	}
 }
 
@@ -124,7 +128,7 @@ func newKeyHelp() help.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.files.Init(), m.warningToast())
+	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast())
 }
 
 func (m Model) warningToast() tea.Cmd {
@@ -194,7 +198,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case git.GenCommitMsgRequest:
-		return m, generateCommitMsg(msg.Ctx, m.cfg.AIBackend, m.cfg.AIModel)
+		return m, generateCommitMsg(msg.Ctx, msg.Repo, m.cfg.AIBackend, m.cfg.AIModel)
 
 	case editorClosedMsg:
 		if msg.err != nil {
@@ -219,10 +223,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case ui.Routed:
-		return m.routeTo(msg.RouteTo(), msg)
+		return m.deliver(msg)
 	}
 
 	return m.routeTo(tabDests[m.active], msg)
+}
+
+func (m Model) deliver(msg ui.Routed) (tea.Model, tea.Cmd) {
+	next, cmd := m.routeTo(msg.RouteTo(), msg)
+	b, ok := msg.(ui.Broadcast)
+	if !ok {
+		return next, cmd
+	}
+	cmds := []tea.Cmd{cmd}
+	for _, dest := range b.AlsoTo() {
+		next, cmd = next.(Model).routeTo(dest, msg)
+		cmds = append(cmds, cmd)
+	}
+	return next, tea.Batch(cmds...)
 }
 
 func (m Model) routeTo(dest ui.Dest, msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -330,14 +348,17 @@ func (m *Model) toggleMouse() tea.Cmd {
 	return tea.EnableMouseAllMotion
 }
 
-func generateCommitMsg(parent context.Context, backend, model string) tea.Cmd {
+func generateCommitMsg(parent context.Context, repo *git.Repo, backend, model string) tea.Cmd {
 	if parent == nil {
 		parent = context.Background()
 	}
 	return func() tea.Msg {
+		if repo == nil {
+			return git.CommitMsgReady{Err: git.ErrNotRepo}
+		}
 		ctx, cancel := context.WithTimeout(parent, commitMsgTimeout)
 		defer cancel()
-		diff, err := git.StagedDiff()
+		diff, err := repo.StagedDiff(ctx)
 		if err != nil {
 			return git.CommitMsgReady{Err: fmt.Errorf("staged diff: %w", err)}
 		}
@@ -413,7 +434,11 @@ func (m Model) tabBar() string {
 }
 
 func (m Model) statusBar() string {
-	left := statusLeft(m.project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
+	project := m.project
+	if top := m.git.Top(); top != "" {
+		project = filepath.Base(top)
+	}
+	left := statusLeft(project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
 	var right []string
 	if n := len(m.toasts); n > 0 {
 		right = append(right, m.toasts[n-1].msg.Render())
