@@ -14,3 +14,9 @@ const (
 // Routed is implemented by async and cross-tab messages. The root model delivers
 // them to their destination whichever tab is active.
 type Routed interface{ RouteTo() Dest }
+
+// Broadcast is a Routed message that other destinations receive as well.
+type Broadcast interface {
+	Routed
+	AlsoTo() []Dest
+}

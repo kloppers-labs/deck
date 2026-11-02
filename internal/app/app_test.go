@@ -257,3 +257,34 @@ func TestRunnerOutputRoutedWhileOtherTabActive(t *testing.T) {
 		t.Error("the task's exit did not reach the Run pane while Files was active")
 	}
 }
+
+func TestInitLoadsGitStatus(t *testing.T) {
+	var refreshed bool
+	for _, msg := range collect(newModel().Init()) {
+		if _, ok := msg.(git.RefreshMsg); ok {
+			refreshed = true
+		}
+	}
+	if !refreshed {
+		t.Error("Init should start the first async git status load")
+	}
+}
+
+func TestStatusLoadedReachesGitAndNamesProject(t *testing.T) {
+	m := update(t, sized(t, 120, 30), git.RefreshMsg{})
+	snap := git.Snapshot{Branch: "feat/x", Upstream: "origin/feat/x", Ahead: 2}
+	m = update(t, m, git.StatusLoadedMsg{Seq: 1, Repo: &git.Repo{Top: "/work/project-root"}, Snapshot: snap})
+	if m.active != tabFiles {
+		t.Fatalf("active = %d, want Files", m.active)
+	}
+	status := ansi.Strip(m.statusBar())
+	if !strings.Contains(status, "project-root") || !strings.Contains(status, "⎇ feat/x ↑2 ↓0") {
+		t.Errorf("status bar = %q, want the repo-root name and ahead/behind", status)
+	}
+}
+
+func TestGitEditMsgOpensEditor(t *testing.T) {
+	if _, cmd := newModel().Update(git.EditMsg{Path: "/tmp/x.go", Line: 3}); cmd == nil {
+		t.Error("an edit request from the Git tab should launch the editor")
+	}
+}
