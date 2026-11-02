@@ -38,6 +38,7 @@ type Document struct {
 	TabWidth  int
 
 	highlighted bool
+	virtual     bool
 	hlGen       int
 	mdReq       [2]int
 	chunkGen    []int

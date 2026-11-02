@@ -1,107 +1,105 @@
-// Package files is deck's Files tab: a directory listing beside the read-only code
-// viewer. Selecting a file loads it asynchronously; enter focuses the viewer.
+// Package files is deck's Files tab: a lazily loaded directory tree beside the
+// read-only code viewer, with git badges, metadata on hover and an info panel.
 package files
 
 import (
-	"errors"
-	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/config"
 	"deck/internal/editor"
+	"deck/internal/git"
 	"deck/internal/httpc"
 	"deck/internal/ui"
 	"deck/internal/viewer"
 )
 
-// ListTop is the row, local to the pane, where the first file row is drawn: the
-// path header, then the list's reserved filter row.
+// ListTop is the row, local to the pane, where the first tree row is drawn: the
+// tree's top border, then the root header.
 const ListTop = 2
 
 const (
-	viewerInsetX = 2
-	viewerInsetY = 1
+	hoverDelay   = 400 * time.Millisecond
+	wheelRows    = 3
+	tooltipWidth = 36
+	defaultWidth = 32
 )
 
-// ReloadMsg re-reads the listing and the open file, keeping the position.
+// ReloadMsg re-reads the tree and the open file, keeping the position.
 type ReloadMsg struct{}
 
-// RevealMsg selects Target's file in the listing and opens it in the viewer at
+// RevealMsg selects Target's file in the tree and opens it in the viewer at
 // Target's position.
 type RevealMsg struct{ Target editor.Target }
 
-func (ReloadMsg) RouteTo() ui.Dest { return ui.DestFiles }
-func (RevealMsg) RouteTo() ui.Dest { return ui.DestFiles }
+type hoverDueMsg struct{ seq int }
+
+func (ReloadMsg) RouteTo() ui.Dest   { return ui.DestFiles }
+func (RevealMsg) RouteTo() ui.Dest   { return ui.DestFiles }
+func (hoverDueMsg) RouteTo() ui.Dest { return ui.DestFiles }
 
 // ReloadCurrent is a command that reloads the Files tab in place.
 func ReloadCurrent() tea.Msg { return ReloadMsg{} }
 
-type entry struct {
-	name  string
-	isDir bool
-}
-
-func (e entry) FilterValue() string { return e.name }
-
-type fileDelegate struct{}
-
-func (fileDelegate) Height() int                         { return 1 }
-func (fileDelegate) Spacing() int                        { return 0 }
-func (fileDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
-
-func (fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	e, ok := item.(entry)
-	if !ok {
-		return
-	}
-	name := e.name
-	if e.isDir {
-		name += "/"
-	}
-	name = ui.FitWidth(name, m.Width()-2, "…")
-	if index == m.Index() {
-		fmt.Fprint(w, ui.Active.Render("› "+name))
-		return
-	}
-	fmt.Fprint(w, "  "+name)
-}
-
 const (
-	focusList = iota
+	focusTree = iota
 	focusViewer
 )
 
-// Model is the Files tab state.
-type Model struct {
-	root    string
-	dir     string
-	list    list.Model
-	viewer  viewer.Model
-	focus   int
-	clicks  ui.ClickTracker
-	width   int
-	height  int
-	err     error
-	shown   string
-	initCmd tea.Cmd
-	dirSel  map[string]string
-	spots   map[string]viewer.Spot
+const (
+	treeAuto = iota
+	treeShown
+	treeHidden
+)
+
+type hoverState struct {
+	path string
+	y    int
+	seq  int
+	due  bool
+	meta *Meta
 }
 
-// New builds the Files tab rooted at dir (default: the working directory). Only the
-// directory is listed here; the first file loads from Init.
+// Model is the Files tab state.
+type Model struct {
+	tree     Tree
+	viewer   viewer.Model
+	focus    int
+	treeMode int
+	sidebar  int
+	info     bool
+	icons    string
+	badgeSrc BadgeSource
+	badgeSeq int
+	badges   Badges
+	agg      map[string]Badge
+	gitTop   [2]string
+	metas    *metaCache
+	statSeq  int
+	infoSeq  int
+	infoPath string
+	infoMeta *Meta
+	hover    hoverState
+	drag     bool
+	clicks   ui.ClickTracker
+	width    int
+	height   int
+	shown    string
+	cardPath string
+	initCmd  tea.Cmd
+	spots    map[string]viewer.Spot
+	now      func() time.Time
+}
+
+// New builds the Files tab rooted at dir (default: the working directory). Only
+// the root is listed here; the first selection loads from Init.
 func New(dir string, cfg config.Config) Model {
 	if dir == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -110,107 +108,56 @@ func New(dir string, cfg config.Config) Model {
 			dir = "."
 		}
 	}
-	l := list.New(nil, fileDelegate{}, 0, 0)
-	l.SetShowTitle(false)
-	l.SetShowStatusBar(false)
-	l.SetShowHelp(false)
-	l.KeyMap.Quit = key.Binding{}
-	v := viewer.New(viewer.Options{
-		Root:              dir,
-		Theme:             cfg.Theme,
-		TabWidth:          cfg.Viewer.TabWidth,
-		ScrollLines:       cfg.Viewer.ScrollLines,
-		MaxHighlightBytes: cfg.Viewer.MaxHighlightBytes,
-		LineNumbers:       cfg.Viewer.LineNumbers,
-		Wrap:              cfg.Viewer.Wrap,
-	})
-	m := Model{
-		root:   dir,
-		dir:    dir,
-		list:   l,
-		viewer: v,
-		dirSel: map[string]string{},
-		spots:  map[string]viewer.Spot{},
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
 	}
-	m.load("")
-	m.initCmd = m.syncSelection()
+	tree, load := NewTree(dir, NewHidePolicy(cfg.Files.Hide, cfg.Files.ShowHidden), SortName)
+	sidebar := cfg.Files.SidebarWidth
+	if sidebar <= 0 {
+		sidebar = defaultWidth
+	}
+	m := Model{
+		tree: tree,
+		viewer: viewer.New(viewer.Options{
+			Root:              dir,
+			Theme:             cfg.Theme,
+			TabWidth:          cfg.Viewer.TabWidth,
+			ScrollLines:       cfg.Viewer.ScrollLines,
+			MaxHighlightBytes: cfg.Viewer.MaxHighlightBytes,
+			LineNumbers:       cfg.Viewer.LineNumbers,
+			Wrap:              cfg.Viewer.Wrap,
+		}),
+		sidebar: sidebar,
+		info:    cfg.Files.InfoPanel,
+		icons:   cfg.Files.Icons,
+		metas:   newMetaCache(),
+		spots:   map[string]viewer.Spot{},
+		now:     time.Now,
+	}
+	m.initCmd = tea.Batch(load, m.syncSelection())
 	return m
 }
 
-// Init loads the initially selected file.
-func (m Model) Init() tea.Cmd { return m.initCmd }
-
-// readDir lists dir with directories first, each group sorted
-// case-insensitively. Symlinks to directories count as directories.
-func readDir(dir string) ([]entry, error) {
-	des, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	entries := make([]entry, 0, len(des))
-	for _, de := range des {
-		isDir := de.IsDir()
-		if de.Type()&fs.ModeSymlink != 0 {
-			if fi, err := os.Stat(filepath.Join(dir, de.Name())); err == nil {
-				isDir = fi.IsDir()
-			}
-		}
-		entries = append(entries, entry{name: de.Name(), isDir: isDir})
-	}
-	sortEntries(entries)
-	return entries, nil
+// WithBadges sets where git badges come from; without one the tree has none
+// until a routed git.StatusLoadedMsg arrives.
+func (m Model) WithBadges(src BadgeSource) Model {
+	m.badgeSrc = src
+	return m
 }
 
-func sortEntries(entries []entry) {
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].isDir != entries[j].isDir {
-			return entries[i].isDir
-		}
-		return strings.ToLower(entries[i].name) < strings.ToLower(entries[j].name)
-	})
+// Init loads the initial selection and the first badges.
+func (m Model) Init() tea.Cmd {
+	var badges tea.Cmd
+	if m.badgeSrc != nil {
+		badges = badgesCmd(m.badgeSrc, m.tree.Launch(), m.badgeSeq)
+	}
+	return tea.Batch(m.initCmd, badges)
 }
 
-// load lists m.dir and selects prefer, else the entry remembered for this
-// directory, else the first.
-func (m *Model) load(prefer string) {
-	entries, err := readDir(m.dir)
-	m.err = err
-	items := make([]list.Item, len(entries))
-	for i, e := range entries {
-		items[i] = e
-	}
-	if prefer == "" {
-		prefer = m.dirSel[m.dir]
-	}
-	m.list.ResetFilter()
-	m.list.SetItems(items)
-	m.list.Select(0)
-	for i, e := range entries {
-		if e.name == prefer {
-			m.list.Select(i)
-			break
-		}
-	}
-	m.list.SetHeight(m.listHeight())
-}
-
-func (m Model) listHeight() int {
-	h := m.height - 1
-	if m.err != nil {
-		h--
-	}
-	return max(h, 0)
-}
-
-func (m Model) listWidth() int {
-	return max(m.width/3, 20)
-}
-
-// SelectedPath is the absolute path of the highlighted entry, or "" when the
-// directory is empty.
+// SelectedPath is the absolute path of the selected tree entry, or "".
 func (m Model) SelectedPath() string {
-	if e, ok := m.selected(); ok {
-		return filepath.Join(m.dir, e.name)
+	if n := m.tree.Selected(); n != nil {
+		return n.Path
 	}
 	return ""
 }
@@ -218,18 +165,49 @@ func (m Model) SelectedPath() string {
 // ViewerLoc is the viewer's cursor location.
 func (m Model) ViewerLoc() viewer.Loc { return m.viewer.Loc() }
 
-func (m Model) selected() (entry, bool) {
-	if e, ok := m.list.SelectedItem().(entry); ok {
-		return e, true
+func (m Model) badgeFor(path string) Badge { return m.agg[path] }
+
+func (m Model) treeVisible() bool {
+	switch m.treeMode {
+	case treeShown:
+		return true
+	case treeHidden:
+		return false
 	}
-	return entry{}, false
+	return m.width >= autoCollapseCols
 }
 
-func (m Model) selectedName() string {
-	if e, ok := m.selected(); ok {
-		return e.name
+func (m Model) layout() Layout {
+	return ComputeLayout(m.width, m.height, m.sidebar, m.treeVisible(), m.info)
+}
+
+func (m *Model) relayout() {
+	l := m.layout()
+	m.tree.SetHeight(l.TreeInner().H - 1)
+	vi := l.ViewerInner()
+	m.viewer.SetSize(vi.W, vi.H)
+	if !l.ShowTree && m.focus == focusTree {
+		m.setFocus(focusViewer)
 	}
-	return ""
+}
+
+// SetSize sets the pane's outer box: the tree, the viewer and the info panel.
+func (m *Model) SetSize(w, h int) {
+	m.width, m.height = w, h
+	m.relayout()
+}
+
+// ResizeCmd re-renders width-dependent viewer content after SetSize.
+func (m Model) ResizeCmd() tea.Cmd { return m.viewer.ResizeCmd() }
+
+func (m *Model) setFocus(f int) {
+	m.focus = f
+	m.viewer.SetFocused(f == focusViewer)
+}
+
+func (m *Model) setSidebar(w int) {
+	m.sidebar = clampSidebar(w, m.width)
+	m.relayout()
 }
 
 func (m *Model) rememberSpot() {
@@ -238,62 +216,90 @@ func (m *Model) rememberSpot() {
 	}
 }
 
-// syncSelection points the viewer at the selected entry, loading files
-// asynchronously and restoring the last position seen in each.
+func (m *Model) spotFor(path string) *viewer.Spot {
+	if s, ok := m.spots[path]; ok {
+		return &s
+	}
+	return nil
+}
+
+// syncSelection points the viewer at the selected entry: files load
+// asynchronously at their last position, directories show a card.
 func (m *Model) syncSelection() tea.Cmd {
-	path := m.SelectedPath()
-	if path == m.shown {
-		return nil
+	info := m.requestInfo()
+	n := m.tree.Selected()
+	path := ""
+	if n != nil {
+		path = n.Path
+	}
+	if path == m.shown && path != "" {
+		return info
 	}
 	m.rememberSpot()
-	m.shown = path
-	e, ok := m.selected()
-	switch {
-	case !ok && m.err == nil:
-		m.viewer = m.viewer.ShowNote("empty directory")
-		return nil
-	case !ok:
-		m.viewer = m.viewer.ShowNote("")
-		return nil
-	case e.isDir:
-		m.viewer = m.viewer.ShowNote("📁 " + e.name + "/")
-		return nil
-	}
-	var at *viewer.Spot
-	if s, ok := m.spots[path]; ok {
-		at = &s
-	}
+	m.shown, m.cardPath = path, ""
 	var cmd tea.Cmd
-	m.viewer, cmd = m.viewer.Open(path, at)
-	return cmd
-}
-
-func (m *Model) chdir(dir, prefer string) tea.Cmd {
-	if name := m.selectedName(); name != "" {
-		m.dirSel[m.dir] = name
+	switch {
+	case n == nil && m.tree.Root().err != nil:
+		m.viewer = m.viewer.ShowNote("")
+	case n == nil:
+		m.viewer = m.viewer.ShowNote("empty directory")
+	case n.IsDir:
+		m.cardPath = path
+		m.viewer, cmd = m.viewer.OpenVirtual(path, m.spotFor(path), dirCardDoc(path, m.tree.Hide(), m.agg, m.tree.Sort()))
+	default:
+		m.viewer, cmd = m.viewer.Open(path, m.spotFor(path))
 	}
-	m.dir = dir
-	m.load(prefer)
-	return m.syncSelection()
+	return tea.Batch(cmd, info)
 }
 
-func (m *Model) setFocus(f int) {
-	m.focus = f
-	m.viewer.SetFocused(f == focusViewer)
+func (m *Model) requestInfo() tea.Cmd {
+	path := m.SelectedPath()
+	if !m.info || path == "" || path == m.infoPath {
+		return nil
+	}
+	m.statSeq++
+	m.infoSeq, m.infoPath, m.infoMeta = m.statSeq, path, nil
+	return StatCmd(path, m.infoSeq, m.metas)
 }
 
-// SetSize sets the pane's outer box: the list column plus the bordered viewer.
-func (m *Model) SetSize(w, h int) {
-	m.width, m.height = w, h
-	m.list.SetSize(m.listWidth(), m.listHeight())
-	m.viewer.SetSize(max(w-m.listWidth()-2*viewerInsetX, 0), max(h-2*viewerInsetY, 0))
+func (m *Model) refreshBadges() tea.Cmd {
+	if m.badgeSrc == nil {
+		return nil
+	}
+	m.badgeSeq++
+	return badgesCmd(m.badgeSrc, m.tree.Launch(), m.badgeSeq)
 }
 
-// ResizeCmd re-renders width-dependent viewer content after SetSize.
-func (m Model) ResizeCmd() tea.Cmd { return m.viewer.ResizeCmd() }
+func (m *Model) applyBadges(b Badges) {
+	m.badges = b
+	m.agg = Aggregate(b.Status)
+	m.tree.SetIgnored(b.Ignored)
+}
+
+func (m *Model) applyStatus(msg git.StatusLoadedMsg) {
+	if msg.Err != nil || msg.Repo == nil {
+		return
+	}
+	if m.gitTop[0] != msg.Repo.Top {
+		m.gitTop = [2]string{msg.Repo.Top, LogicalTop(m.tree.Launch(), msg.Repo.Top)}
+	}
+	b := BadgesFromEntries(m.gitTop[1], msg.Snapshot.Entries)
+	if len(b.Ignored) == 0 {
+		b.Ignored = m.badges.Ignored
+	}
+	m.applyBadges(b)
+}
+
+func (m *Model) clearHover() {
+	if m.hover.path == "" && !m.hover.due {
+		return
+	}
+	m.statSeq++
+	m.hover = hoverState{seq: m.statSeq}
+}
 
 // Update routes viewer messages to the viewer, keys by focus and mouse events
-// by region.
+// by region, and applies the tab's own async results.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case viewer.Msg:
@@ -304,215 +310,451 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.reload()
 	case RevealMsg:
 		return m.reveal(msg.Target)
+	case dirLoadedMsg:
+		m.tree.Loaded(msg)
+		return m, m.syncSelection()
+	case BadgesMsg:
+		if msg.Seq == m.badgeSeq {
+			m.applyBadges(msg.Badges)
+		}
+		return m, nil
+	case RefreshBadgesMsg, tea.FocusMsg:
+		return m, m.refreshBadges()
+	case git.StatusLoadedMsg:
+		m.applyStatus(msg)
+		return m, nil
+	case StatMsg:
+		meta := msg.Meta
+		if msg.Seq == m.infoSeq {
+			m.infoMeta = &meta
+		}
+		if msg.Seq == m.hover.seq && m.hover.due {
+			m.hover.meta = &meta
+		}
+		return m, nil
+	case hoverDueMsg:
+		if msg.seq != m.hover.seq || m.hover.path == "" {
+			return m, nil
+		}
+		m.hover.due = true
+		return m, StatCmd(m.hover.path, m.hover.seq, m.metas)
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:
+		m.clearHover()
 		if m.focus == focusViewer {
 			return m.viewerKey(msg)
 		}
-		return m.listKey(msg)
+		return m.treeKey(msg)
 	}
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
+	return m, nil
+}
+
+// paneKey handles the keys that work from both regions.
+func (m *Model) paneKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	switch msg.String() {
+	case "ctrl+b":
+		if m.layout().ShowTree {
+			m.treeMode = treeHidden
+		} else {
+			m.treeMode = treeShown
+		}
+		m.relayout()
+		return m.viewer.ResizeCmd(), true
+	case "i":
+		m.info = !m.info
+		m.infoPath = ""
+		m.relayout()
+		return tea.Batch(m.viewer.ResizeCmd(), m.requestInfo()), true
+	}
+	return nil, false
 }
 
 func (m Model) viewerKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if msg.Type == tea.KeyEsc && !m.viewer.WantsEsc() {
-		m.setFocus(focusList)
+		if m.layout().ShowTree {
+			m.setFocus(focusTree)
+		}
 		return m, nil
+	}
+	if !m.viewer.Capturing() {
+		if cmd, ok := m.paneKey(msg); ok {
+			return m, cmd
+		}
+		if msg.String() == "e" && m.cardPath != "" && m.cardPath == m.viewer.Path() {
+			return m, nil
+		}
 	}
 	var cmd tea.Cmd
 	m.viewer, cmd = m.viewer.Update(msg)
 	return m, cmd
 }
 
-func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	if m.list.FilterState() != list.Filtering {
-		switch msg.String() {
-		case "enter", "l", "right":
-			return m.activate()
-		case "backspace", "h", "left", "-":
-			cmd := m.chdir(filepath.Dir(m.dir), filepath.Base(m.dir))
-			return m, cmd
-		case "e":
-			return m, m.openEditor()
-		case "x":
-			if cmd := m.sendHTTPFile(); cmd != nil {
-				return m, cmd
-			}
-		}
+func (m Model) treeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if cmd, ok := m.paneKey(msg); ok {
+		return m, cmd
 	}
+	n := m.tree.Selected()
+	page := max(m.tree.height, 1)
 	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	sync := m.syncSelection()
-	return m, tea.Batch(cmd, sync)
-}
-
-func (m Model) sendHTTPFile() tea.Cmd {
-	e, ok := m.selected()
-	if !ok || e.isDir || !strings.EqualFold(filepath.Ext(e.name), ".http") {
-		return nil
+	switch msg.String() {
+	case "j", "down":
+		m.tree.Move(1)
+	case "k", "up":
+		m.tree.Move(-1)
+	case "g", "home":
+		m.tree.Select(0)
+	case "G", "end":
+		m.tree.Select(len(m.tree.Rows()) - 1)
+	case "ctrl+d":
+		m.tree.Move(max(page/2, 1))
+	case "ctrl+u":
+		m.tree.Move(-max(page/2, 1))
+	case "pgdown":
+		m.tree.Move(page)
+	case "pgup":
+		m.tree.Move(-page)
+	case "enter":
+		return m.activate()
+	case "l", "right":
+		switch {
+		case n == nil:
+		case !n.IsDir:
+			return m.activate()
+		case !n.Expanded:
+			cmd = m.tree.Expand(n)
+		case m.tree.sel+1 < len(m.tree.Rows()) && m.tree.Rows()[m.tree.sel+1].Depth > n.Depth:
+			m.tree.Move(1)
+		}
+	case "h", "left":
+		if n != nil && n.IsDir && n.Expanded {
+			m.tree.Collapse(n)
+		} else {
+			m.tree.SelectParent()
+		}
+	case "-", "backspace":
+		m.tree.RerootUp()
+	case "=":
+		m.tree.RerootAt(n)
+	case "~":
+		m.tree.RerootLaunch()
+	case ".":
+		m.tree.ToggleDotfiles()
+	case "I":
+		m.tree.ToggleIgnored()
+	case "s":
+		m.tree.SetSort(m.tree.Sort().Next())
+	case "R":
+		return m.reload()
+	case "<":
+		m.setSidebar(m.layout().Tree.W - sidebarStep)
+		return m, m.viewer.ResizeCmd()
+	case ">":
+		m.setSidebar(m.layout().Tree.W + sidebarStep)
+		return m, m.viewer.ResizeCmd()
+	case "e":
+		return m, m.openEditor()
+	case "x":
+		return m, m.sendHTTPFile()
+	default:
+		return m, nil
 	}
-	return httpc.LoadRequest(filepath.Join(m.dir, e.name), 0)
-}
-
-func (m Model) openEditor() tea.Cmd {
-	e, ok := m.selected()
-	if !ok || e.isDir {
-		return nil
-	}
-	t := editor.Target{Path: filepath.Join(m.dir, e.name), Line: 1, Col: 1}
-	return func() tea.Msg { return editor.OpenMsg{Target: t} }
+	return m, tea.Batch(cmd, m.syncSelection())
 }
 
 func (m Model) activate() (Model, tea.Cmd) {
-	e, ok := m.selected()
-	if !ok {
+	n := m.tree.Selected()
+	if n == nil {
 		return m, nil
 	}
-	if e.isDir {
-		cmd := m.chdir(filepath.Join(m.dir, e.name), "")
-		return m, cmd
+	if n.IsDir {
+		cmd := m.tree.Toggle(n)
+		return m, tea.Batch(cmd, m.syncSelection())
 	}
 	cmd := m.syncSelection()
 	m.setFocus(focusViewer)
 	return m, cmd
 }
 
+func (m Model) sendHTTPFile() tea.Cmd {
+	n := m.tree.Selected()
+	if n == nil || n.IsDir || !strings.EqualFold(filepath.Ext(n.Name), ".http") {
+		return nil
+	}
+	return httpc.LoadRequest(n.Path, 0)
+}
+
+func (m Model) openEditor() tea.Cmd {
+	n := m.tree.Selected()
+	if n == nil || n.IsDir {
+		return nil
+	}
+	t := editor.Target{Path: n.Path, Line: 1, Col: 1}
+	if m.viewer.Path() == n.Path && m.viewer.Loaded() {
+		loc := m.viewer.Loc()
+		t.Line, t.Col = loc.Line+1, loc.Col+1
+	}
+	return func() tea.Msg { return editor.OpenMsg{Target: t} }
+}
+
 func (m Model) reload() (Model, tea.Cmd) {
-	path := m.SelectedPath()
-	m.load(m.selectedName())
-	if p := m.SelectedPath(); p == path && p != "" && p == m.viewer.Path() {
+	m.tree.Reload()
+	m.infoPath = ""
+	badges := m.refreshBadges()
+	n := m.tree.Selected()
+	if n != nil && !n.IsDir && n.Path == m.shown && n.Path == m.viewer.Path() {
 		var cmd tea.Cmd
 		m.viewer, cmd = m.viewer.Reload()
-		return m, cmd
+		return m, tea.Batch(cmd, badges, m.requestInfo())
 	}
-	cmd := m.syncSelection()
-	return m, cmd
+	m.shown = ""
+	return m, tea.Batch(m.syncSelection(), badges)
 }
 
 func (m Model) reveal(t editor.Target) (Model, tea.Cmd) {
 	if t.Path == "" {
 		return m, nil
 	}
-	if dir := filepath.Dir(t.Path); dir != m.dir {
-		if name := m.selectedName(); name != "" {
-			m.dirSel[m.dir] = name
-		}
-		m.dir = dir
-	}
-	m.load(filepath.Base(t.Path))
+	m.tree.Reveal(t.Path)
 	m.rememberSpot()
-	m.shown = t.Path
+	m.shown, m.cardPath = t.Path, ""
 	spot := viewer.Spot{Line: max(t.Line-1, 0), Col: max(t.Col-1, 0), Top: t.Top - 1}
 	var cmd tea.Cmd
 	m.viewer, cmd = m.viewer.Open(t.Path, &spot)
 	m.setFocus(focusViewer)
-	return m, cmd
-}
-
-func (m Model) viewerRect() ui.Rect {
-	return ui.Rect{X: m.listWidth() + viewerInsetX, Y: viewerInsetY, W: max(m.width-m.listWidth()-2*viewerInsetX, 0), H: max(m.height-2*viewerInsetY, 0)}
+	return m, tea.Batch(cmd, m.requestInfo())
 }
 
 func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
-	listW := m.listWidth()
-	if msg.X >= listW {
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			m.setFocus(focusViewer)
+	l := m.layout()
+	if m.drag {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			m.setSidebar(msg.X + 1)
+		case tea.MouseActionRelease:
+			m.drag = false
 		}
-		local := msg
-		local.X, local.Y = m.viewerRect().Local(msg.X, msg.Y)
-		var cmd tea.Cmd
-		m.viewer, cmd = m.viewer.Update(local)
-		return m, cmd
+		return m, m.viewer.ResizeCmd()
 	}
-	if tea.MouseEvent(msg).IsWheel() {
-		switch msg.Button {
-		case tea.MouseButtonWheelDown:
-			m.list.CursorDown()
-		case tea.MouseButtonWheelUp:
-			m.list.CursorUp()
-		}
-		cmd := m.syncSelection()
-		return m, cmd
-	}
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+	press := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
+	if press && l.OnDivider(msg.X, msg.Y) {
+		m.clearHover()
+		m.drag = true
 		return m, nil
 	}
-	if m.list.FilterState() == list.Filtering {
+	if l.ShowTree && l.Tree.Contains(msg.X, msg.Y) {
+		return m.treeMouse(msg, l)
+	}
+	m.clearHover()
+	if !l.Viewer.Contains(msg.X, msg.Y) {
 		return m, nil
 	}
-	row := msg.Y - ListTop
-	idx := m.list.Paginator.Page*m.list.Paginator.PerPage + row
-	if row < 0 || row >= m.list.Paginator.PerPage || idx >= len(m.list.VisibleItems()) {
-		return m, nil
+	if press {
+		m.setFocus(focusViewer)
 	}
-	m.setFocus(focusList)
-	m.list.Select(idx)
-	cmd := m.syncSelection()
-	if ui.IsDouble(m.clicks.Press(msg.X, msg.Y, time.Now())) {
-		next, open := m.activate()
-		return next, tea.Batch(cmd, open)
-	}
+	local := msg
+	local.X, local.Y = l.ViewerInner().Local(msg.X, msg.Y)
+	var cmd tea.Cmd
+	m.viewer, cmd = m.viewer.Update(local)
 	return m, cmd
 }
 
-// Capturing reports whether typed text belongs to the pane: the list filter,
-// or a viewer prompt or pending chord. Reading never captures.
-func (m Model) Capturing() bool {
-	if m.list.FilterState() == list.Filtering {
-		return true
+func (m Model) treeMouse(msg tea.MouseMsg, l Layout) (Model, tea.Cmd) {
+	inner := l.TreeInner()
+	rows, top := m.tree.Visible()
+	row := msg.Y - inner.Y - 1
+	var n *Node
+	if row >= 0 && row < len(rows) && inner.Contains(msg.X, msg.Y) {
+		n = rows[row]
 	}
+	switch {
+	case tea.MouseEvent(msg).IsWheel():
+		m.clearHover()
+		switch msg.Button {
+		case tea.MouseButtonWheelDown:
+			m.tree.ScrollBy(wheelRows)
+		case tea.MouseButtonWheelUp:
+			m.tree.ScrollBy(-wheelRows)
+		}
+		return m, nil
+	case msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonNone:
+		return m.hoverRow(n, msg.Y)
+	case msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft:
+		return m, nil
+	}
+	m.clearHover()
+	if n == nil {
+		return m, nil
+	}
+	m.setFocus(focusTree)
+	m.tree.Select(top + row)
+	var cmd tea.Cmd
+	x := msg.X - inner.X - n.Depth*2
+	double := ui.IsDouble(m.clicks.Press(msg.X, msg.Y, time.Now()))
+	switch {
+	case n.IsDir && x >= 0 && x < 2:
+		cmd = m.tree.Toggle(n)
+	case double:
+		return m.activate()
+	}
+	return m, tea.Batch(cmd, m.syncSelection())
+}
+
+func (m Model) hoverRow(n *Node, y int) (Model, tea.Cmd) {
+	if n == nil {
+		m.clearHover()
+		return m, nil
+	}
+	if n.Path == m.hover.path {
+		return m, nil
+	}
+	m.statSeq++
+	seq := m.statSeq
+	m.hover = hoverState{path: n.Path, y: y, seq: seq}
+	return m, tea.Tick(hoverDelay, func(time.Time) tea.Msg { return hoverDueMsg{seq: seq} })
+}
+
+// Capturing reports whether typed text belongs to the pane: a viewer prompt or
+// pending chord. The tree never captures.
+func (m Model) Capturing() bool {
 	return m.focus == focusViewer && m.viewer.Capturing()
 }
 
 var (
-	listBindings = []key.Binding{
-		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
-		key.NewBinding(key.WithKeys("enter", "l"), key.WithHelp("enter", "view")),
+	treeBindings = []key.Binding{
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+		key.NewBinding(key.WithKeys("l", "h"), key.WithHelp("l/h", "fold")),
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-		key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←", "up dir")),
-		key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "send .http to HTTP")),
+		key.NewBinding(key.WithKeys("-", "=", "~"), key.WithHelp("-/=/~", "root")),
+		key.NewBinding(key.WithKeys(".", "I"), key.WithHelp("./I", "hide")),
+		key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
+		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
+		key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "tree")),
+		key.NewBinding(key.WithKeys("<", ">"), key.WithHelp("</>", "width")),
+		key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
+		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "http")),
 	}
-	backToList = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list"))
+	viewerExtras = []key.Binding{
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
+		key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "tree")),
+	}
 )
 
 // HelpBindings returns the key hints for whichever region has focus.
 func (m Model) HelpBindings() []key.Binding {
 	if m.focus == focusViewer {
-		return append(m.viewer.HelpBindings(), backToList)
+		return append(append([]key.Binding{}, viewerExtras...), m.viewer.HelpBindings()...)
 	}
-	return listBindings
+	return treeBindings
 }
 
-// View renders the listing and viewer side by side, filling exactly the box
-// given to SetSize.
+func (m Model) regionStyle(region int) lipgloss.Style {
+	s := ui.Pane
+	if m.focus == region {
+		s = ui.PaneActive
+	}
+	if region == focusTree {
+		s = s.Padding(0)
+	}
+	return s
+}
+
+var tooltipStyle = ui.PaneActive
+
+// tooltip is the hover box for the row under the mouse, once its dwell is due
+// and its metadata has arrived.
+func (m Model) tooltip() string {
+	if !m.hover.due || m.hover.meta == nil {
+		return ""
+	}
+	lines := FormatMeta(*m.hover.meta, m.badgeFor(m.hover.path), tooltipWidth-4, m.now())
+	return tooltipStyle.Render(strings.Join(lines, "\n"))
+}
+
+// View renders the tree, viewer and info panel side by side, filling exactly
+// the box given to SetSize, with the hover tooltip composed on top.
 func (m Model) View() string {
-	listW := m.listWidth()
-	header := ui.Muted.Render(headerPath(m.root, m.dir, listW-1))
-	col := ui.Fit(header+"\n"+m.list.View(), listW, m.listHeight()+1)
-	if m.err != nil {
-		col += "\n" + ui.Err.Render(ui.FitWidth(loadError(m.err), listW-1, "…"))
+	if m.width <= 0 || m.height <= 0 {
+		return ""
 	}
-	paneStyle := ui.Pane
-	if m.focus == focusViewer {
-		paneStyle = ui.PaneActive
+	l := m.layout()
+	var cols []string
+	if l.ShowTree {
+		ti := l.TreeInner()
+		cols = append(cols, m.regionStyle(focusTree).Render(ui.Fit(m.treeView(ti.W, ti.H), ti.W, ti.H)))
 	}
-	r := m.viewerRect()
-	pane := paneStyle.Render(ui.Fit(m.viewer.View(), r.W, r.H))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, ui.Fit(col, listW, m.height), pane)
+	vi := l.ViewerInner()
+	cols = append(cols, m.regionStyle(focusViewer).Render(ui.Fit(m.viewer.View(), vi.W, vi.H)))
+	if l.ShowInfo {
+		ii := l.InfoInner()
+		cols = append(cols, ui.Pane.Render(ui.Fit(m.infoView(ii.W), ii.W, ii.H)))
+	}
+	body := ui.Fit(lipgloss.JoinHorizontal(lipgloss.Top, cols...), m.width, m.height)
+	if tip := m.tooltip(); tip != "" {
+		anchor := ui.Rect{X: l.Tree.X + l.Tree.W, Y: m.hover.y}
+		r := viewer.PlacePopup(anchor, lipgloss.Width(tip), lipgloss.Height(tip), ui.Rect{W: m.width, H: m.height})
+		body = ui.Overlay(body, tip, r.X, r.Y)
+	}
 	return ui.Fit(body, m.width, m.height)
 }
 
-func loadError(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		return pe.Err.Error()
+func (m Model) treeView(w, h int) string {
+	out := []string{m.treeHeader(w)}
+	root := m.tree.Root()
+	rows, top := m.tree.Visible()
+	switch {
+	case root.err != nil:
+		out = append(out, ui.Err.Render(ui.FitWidth(loadError(root.err), w, "…")))
+	case root.loading:
+		out = append(out, ui.Muted.Render("loading…"))
+	case len(rows) == 0:
+		out = append(out, ui.Muted.Render("empty directory"))
 	}
-	return err.Error()
+	hide := m.tree.Hide()
+	for i, n := range rows {
+		out = append(out, renderRow(n, rowStyle{
+			width:    w,
+			icons:    m.icons,
+			badge:    m.agg[n.Path],
+			selected: top+i == m.tree.sel,
+			focused:  m.focus == focusTree,
+			ignored:  hide.ShowIgnored && hide.IsIgnored(n.Path),
+		}))
+		if len(out) >= h {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func (m Model) treeHeader(w int) string {
+	var flags []string
+	if s := m.tree.Sort(); s != SortName {
+		flags = append(flags, "↓"+s.String())
+	}
+	hide := m.tree.Hide()
+	if hide.ShowDot {
+		flags = append(flags, ".")
+	}
+	if hide.ShowIgnored {
+		flags = append(flags, "I")
+	}
+	right := strings.Join(flags, " ")
+	room := w
+	if right != "" {
+		room -= ansi.StringWidth(right) + 1
+	}
+	left := headerPath(m.tree.Launch(), m.tree.Root().Path, max(room, 0))
+	gap := max(w-ansi.StringWidth(left)-ansi.StringWidth(right), 0)
+	return ui.Muted.Render(left + strings.Repeat(" ", gap) + right)
+}
+
+func (m Model) infoView(w int) string {
+	if m.infoMeta == nil || m.infoMeta.Path != m.SelectedPath() {
+		return ui.Muted.Render("…")
+	}
+	return strings.Join(FormatMeta(*m.infoMeta, m.badgeFor(m.infoMeta.Path), w, m.now()), "\n")
 }
 
 // headerPath shows dir relative to the launch root (prefixed with the root's

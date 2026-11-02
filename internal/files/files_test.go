@@ -6,19 +6,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/config"
 	"deck/internal/editor"
+	"deck/internal/ui"
 	"deck/internal/viewer"
 )
 
 func keyMsg(s string) tea.KeyMsg {
 	special := map[string]tea.KeyType{
 		"enter": tea.KeyEnter, "esc": tea.KeyEsc, "right": tea.KeyRight, "left": tea.KeyLeft,
-		"down": tea.KeyDown, "up": tea.KeyUp, "backspace": tea.KeyBackspace,
+		"down": tea.KeyDown, "up": tea.KeyUp, "backspace": tea.KeyBackspace, "ctrl+b": tea.KeyCtrlB,
 	}
 	if k, ok := special[s]; ok {
 		return tea.KeyMsg{Type: k}
@@ -44,8 +44,8 @@ func collect(cmd tea.Cmd) []tea.Msg {
 	return []tea.Msg{msg}
 }
 
-// settle feeds every message the commands produce back into the pane, the way
-// the Bubble Tea runtime would, and returns the messages that leave the pane.
+// settle feeds every Files-bound message the commands produce back into the
+// pane, the way the root model would, and returns the messages that leave it.
 func settle(t *testing.T, m Model, cmd tea.Cmd) (Model, []tea.Msg) {
 	t.Helper()
 	var out []tea.Msg
@@ -54,14 +54,13 @@ func settle(t *testing.T, m Model, cmd tea.Cmd) (Model, []tea.Msg) {
 		if i > 200 {
 			t.Fatal("commands never settled")
 		}
-		switch msg := queue[i].(type) {
-		case viewer.Msg, list.FilterMatchesMsg, ReloadMsg, RevealMsg:
+		if r, ok := queue[i].(ui.Routed); ok && r.RouteTo() == ui.DestFiles {
 			var next tea.Cmd
-			m, next = m.Update(msg)
+			m, next = m.Update(queue[i])
 			queue = append(queue, collect(next)...)
-		default:
-			out = append(out, msg)
+			continue
 		}
+		out = append(out, queue[i])
 	}
 	return m, out
 }
@@ -110,26 +109,10 @@ func openMsgs(msgs []tea.Msg) []editor.OpenMsg {
 	return out
 }
 
-func TestSortEntriesDirsFirst(t *testing.T) {
-	in := []entry{
-		{name: "zebra.go", isDir: false},
-		{name: "src", isDir: true},
-		{name: "Apple.txt", isDir: false},
-		{name: "build", isDir: true},
-	}
-	sortEntries(in)
-	want := []string{"build", "src", "Apple.txt", "zebra.go"}
-	for i, w := range want {
-		if in[i].name != w {
-			t.Errorf("position %d = %q, want %q (order: %+v)", i, in[i].name, w, in)
-		}
-	}
-}
-
 func TestInitLoadsFirstFile(t *testing.T) {
 	dir := fixture(t, map[string]int{"a.go": 3})
 	m := New(dir, config.Default())
-	m.SetSize(80, 24)
+	m.SetSize(100, 24)
 	if m.viewer.Loaded() {
 		t.Fatal("New must not read the file; that belongs to Init")
 	}
@@ -141,7 +124,7 @@ func TestInitLoadsFirstFile(t *testing.T) {
 
 func TestSelectionLoadsAsync(t *testing.T) {
 	dir := fixture(t, map[string]int{"a.go": 3, "b.go": 5})
-	m := started(t, dir, 80, 24)
+	m := started(t, dir, 100, 24)
 	m, cmd := m.Update(keyMsg("j"))
 	if m.viewer.Path() != filepath.Join(dir, "b.go") || m.viewer.Loaded() {
 		t.Fatalf("moving should start a load, not read in Update: path=%q loaded=%v", m.viewer.Path(), m.viewer.Loaded())
@@ -168,7 +151,7 @@ func TestSelectionLoadsAsync(t *testing.T) {
 func TestEnterOnFileFocusesViewer(t *testing.T) {
 	dir := fixture(t, map[string]int{"a.go": 30, "b.go": 3})
 	for _, k := range []string{"enter", "l", "right"} {
-		m := started(t, dir, 80, 24)
+		m := started(t, dir, 100, 24)
 		m, out := press(t, m, k)
 		if m.focus != focusViewer {
 			t.Errorf("%q on a file should focus the viewer", k)
@@ -177,8 +160,8 @@ func TestEnterOnFileFocusesViewer(t *testing.T) {
 			t.Errorf("%q must not launch the editor", k)
 		}
 		m, _ = press(t, m, "j", "j")
-		if m.list.Index() != 0 || m.viewer.Loc().Line != 2 {
-			t.Errorf("j in the viewer should move its cursor (line %d), not the list (%d)", m.viewer.Loc().Line, m.list.Index())
+		if m.tree.sel != 0 || m.viewer.Loc().Line != 2 {
+			t.Errorf("j in the viewer should move its cursor (line %d), not the tree (%d)", m.viewer.Loc().Line, m.tree.sel)
 		}
 		if m.Capturing() {
 			t.Error("reading in the viewer must not capture")
@@ -186,9 +169,50 @@ func TestEnterOnFileFocusesViewer(t *testing.T) {
 	}
 }
 
-func TestEscReturnsToList(t *testing.T) {
+func TestEnterOnDirTogglesAndLExpands(t *testing.T) {
+	dir := fixture(t, map[string]int{"sub/a.go": 1, "sub/b.go": 1, "z.go": 1})
+	m := started(t, dir, 100, 24)
+	m, _ = press(t, m, "enter")
+	if got := rowNames(m.tree.Rows()); strings.Join(got, ",") != "sub,  a.go,  b.go,z.go" {
+		t.Fatalf("enter on a directory expands it in place: %v", got)
+	}
+	if m.focus != focusTree || m.SelectedPath() != filepath.Join(dir, "sub") {
+		t.Error("expanding keeps the tree focused on the directory")
+	}
+	m, _ = press(t, m, "enter")
+	if len(m.tree.Rows()) != 2 {
+		t.Errorf("a second enter collapses it, rows = %v", rowNames(m.tree.Rows()))
+	}
+	m, _ = press(t, m, "l", "l")
+	if m.SelectedPath() != filepath.Join(dir, "sub", "a.go") {
+		t.Errorf("l expands, then l again steps into the first child; selected %q", m.SelectedPath())
+	}
+	m, _ = press(t, m, "h")
+	if m.SelectedPath() != filepath.Join(dir, "sub") {
+		t.Errorf("h on a file selects its directory, got %q", m.SelectedPath())
+	}
+	m, _ = press(t, m, "h")
+	if len(m.tree.Rows()) != 2 {
+		t.Errorf("h on an expanded directory collapses it")
+	}
+}
+
+func TestSwitchingFilesKeepsExpansion(t *testing.T) {
+	dir := fixture(t, map[string]int{"sub/a.go": 30, "sub/b.go": 3, "z.go": 1})
+	m := started(t, dir, 100, 30)
+	m, _ = press(t, m, "l", "j", "enter", "j", "j", "esc", "j")
+	if m.SelectedPath() != filepath.Join(dir, "sub", "b.go") || len(m.tree.Rows()) != 4 {
+		t.Fatalf("selected %q rows %v", m.SelectedPath(), rowNames(m.tree.Rows()))
+	}
+	m, _ = press(t, m, "k")
+	if line := m.viewer.Loc().Line; line != 2 {
+		t.Errorf("returning to a.go restores its position, line = %d", line)
+	}
+}
+
+func TestEscReturnsToTree(t *testing.T) {
 	dir := fixture(t, map[string]int{"a.go": 30, "b.go": 3})
-	m := started(t, dir, 80, 24)
+	m := started(t, dir, 100, 24)
 	m, _ = press(t, m, "enter", "/")
 	if !m.Capturing() {
 		t.Fatal("the viewer's search prompt should capture")
@@ -198,102 +222,133 @@ func TestEscReturnsToList(t *testing.T) {
 		t.Error("the first esc closes the prompt and keeps viewer focus")
 	}
 	m, _ = press(t, m, "esc")
-	if m.focus != focusList {
-		t.Error("esc with nothing to close in the viewer returns to the list")
+	if m.focus != focusTree {
+		t.Error("esc with nothing to close in the viewer returns to the tree")
 	}
 	m, _ = press(t, m, "j")
-	if m.list.Index() != 1 {
-		t.Error("j after returning should move the list")
+	if m.tree.sel != 1 {
+		t.Error("j after returning should move the tree")
 	}
 }
 
-func TestLDoesNotLaunchEditor(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 3})
-	m := started(t, dir, 80, 24)
-	if _, out := press(t, m, "l"); len(openMsgs(out)) != 0 {
-		t.Error("l on a file must not launch the editor")
-	}
-}
-
-func TestEOpensEditorAtLineOne(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 3})
-	m := started(t, dir, 80, 24)
+func TestEOpensEditorAtCursor(t *testing.T) {
+	dir := fixture(t, map[string]int{"a.go": 30})
+	m := started(t, dir, 100, 24)
 	_, out := press(t, m, "e")
 	opens := openMsgs(out)
 	want := editor.Target{Path: filepath.Join(dir, "a.go"), Line: 1, Col: 1}
 	if len(opens) != 1 || opens[0].Target != want {
-		t.Errorf("e from the list = %+v, want %+v", opens, want)
+		t.Errorf("e from the tree = %+v, want %+v", opens, want)
 	}
-}
-
-func TestEInViewerOpensAtCursor(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 30})
-	m := started(t, dir, 80, 24)
 	m, _ = press(t, m, "enter", "j", "j", "l")
-	_, out := press(t, m, "e")
-	opens := openMsgs(out)
+	_, out = press(t, m, "e")
+	opens = openMsgs(out)
 	if len(opens) != 1 || opens[0].Target.Line != 3 || opens[0].Target.Col != 2 {
 		t.Errorf("e in the viewer = %+v, want line 3 col 2", opens)
 	}
-}
-
-func TestUpDirSelectsChild(t *testing.T) {
-	dir := fixture(t, map[string]int{"aaa/x.go": 1, "sub/y.go": 1, "z.go": 1})
-	m := started(t, dir, 80, 24)
-	m, _ = press(t, m, "j", "enter")
-	if m.dir != filepath.Join(dir, "sub") {
-		t.Fatalf("enter on a directory should open it, dir = %q", m.dir)
-	}
-	m, _ = press(t, m, "h")
-	if m.dir != dir || m.selectedName() != "sub" {
-		t.Errorf("up: dir=%q selected=%q, want the root with sub selected", m.dir, m.selectedName())
-	}
-}
-
-func TestEscClearsAppliedFilter(t *testing.T) {
-	dir := fixture(t, map[string]int{"alpha.go": 1, "beta.go": 1, "gamma.go": 1})
-	m := started(t, dir, 80, 24)
-	m, _ = press(t, m, "/", "b", "e", "t", "enter")
-	if m.list.FilterState() != list.FilterApplied || len(m.list.VisibleItems()) != 1 {
-		t.Fatalf("filter state = %v with %d items", m.list.FilterState(), len(m.list.VisibleItems()))
-	}
-	if m.Capturing() {
-		t.Error("an applied filter no longer captures")
-	}
 	m, _ = press(t, m, "esc")
-	if m.list.FilterState() != list.Unfiltered || len(m.list.VisibleItems()) != 3 {
-		t.Errorf("esc should clear the applied filter: state %v, %d items", m.list.FilterState(), len(m.list.VisibleItems()))
+	_, out = press(t, m, "e")
+	if opens = openMsgs(out); len(opens) != 1 || opens[0].Target.Line != 3 {
+		t.Errorf("e from the tree on the open file uses the viewer cursor, got %+v", opens)
 	}
 }
 
-func TestSymlinkedDirIsDir(t *testing.T) {
-	dir := fixture(t, map[string]int{"real/x.go": 1})
-	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
-		t.Skip("symlinks unsupported:", err)
+func TestRerootKeys(t *testing.T) {
+	parent := t.TempDir()
+	touch(t, parent, "proj/src/a.go", "proj/z.go", "other.txt")
+	proj := filepath.Join(parent, "proj")
+	m := started(t, proj, 100, 24)
+	m, _ = press(t, m, "-")
+	if m.tree.Root().Path != parent || m.SelectedPath() != proj {
+		t.Errorf("- moves the root up and selects the old root: root %q selected %q", m.tree.Root().Path, m.SelectedPath())
 	}
-	if err := os.Symlink(filepath.Join(dir, "missing"), filepath.Join(dir, "broken")); err != nil {
-		t.Fatal(err)
+	m, _ = press(t, m, "~")
+	if m.tree.Root().Path != proj {
+		t.Errorf("~ returns to the launch root, got %q", m.tree.Root().Path)
 	}
-	entries, err := readDir(dir)
-	if err != nil {
-		t.Fatal(err)
+	m, _ = press(t, m, "=")
+	if m.tree.Root().Path != filepath.Join(proj, "src") {
+		t.Errorf("= on src makes it the root, got %q", m.tree.Root().Path)
 	}
-	kinds := map[string]bool{}
-	for _, e := range entries {
-		kinds[e.name] = e.isDir
+	if v := ansi.Strip(m.View()); !strings.Contains(v, filepath.Join("proj", "src")) {
+		t.Errorf("the tree header shows the root relative to the launch dir:\n%s", v)
 	}
-	if !kinds["link"] || !kinds["real"] || kinds["broken"] {
-		t.Errorf("isDir by name = %v; a symlinked directory is a directory, a broken link is not", kinds)
+}
+
+func TestSortAndHideKeys(t *testing.T) {
+	dir := fixture(t, map[string]int{"b.go": 1, "a.txt": 1, ".env": 1})
+	m := started(t, dir, 100, 24)
+	m, _ = press(t, m, "s")
+	if m.tree.Sort() != SortModified || !strings.Contains(ansi.Strip(m.View()), "↓modified") {
+		t.Error("s cycles the sort mode and the header shows it")
+	}
+	m, _ = press(t, m, ".")
+	if got := rowNames(m.tree.Rows()); len(got) != 3 {
+		t.Errorf(". shows dotfiles: %v", got)
+	}
+}
+
+func TestRevealMsgSelectsAndGoes(t *testing.T) {
+	dir := fixture(t, map[string]int{"a.go": 1, "sub/c.go": 100})
+	m := started(t, dir, 100, 30)
+	target := filepath.Join(dir, "sub", "c.go")
+	m, cmd := m.Update(RevealMsg{Target: editor.Target{Path: target, Line: 50, Col: 3}})
+	m, _ = settle(t, m, cmd)
+	if m.SelectedPath() != target {
+		t.Fatalf("reveal selected %q", m.SelectedPath())
+	}
+	if loc := m.viewer.Loc(); loc.Line != 49 || loc.Col != 2 || m.focus != focusViewer {
+		t.Errorf("reveal: viewer at %+v focus %d, want line 49 col 2 with viewer focus", loc, m.focus)
+	}
+	if got := rowNames(m.tree.Rows()); strings.Join(got, ",") != "sub,  c.go,a.go" {
+		t.Errorf("reveal expands the ancestors: %v", got)
+	}
+}
+
+func TestReloadKeepsPositionAndExpansion(t *testing.T) {
+	dir := fixture(t, map[string]int{"sub/a.go": 50, "z.go": 1})
+	m := started(t, dir, 100, 30)
+	m, _ = press(t, m, "l", "j", "enter", "j", "j", "j", "j")
+	touch(t, dir, "sub/new.go")
+	m, cmd := m.Update(ReloadCurrent())
+	m, _ = settle(t, m, cmd)
+	if line := m.viewer.Loc().Line; line != 4 || !m.viewer.Loaded() {
+		t.Errorf("after reload the viewer should stay on line 4, got %d", line)
+	}
+	if got := rowNames(m.tree.Rows()); strings.Join(got, ",") != "sub,  a.go,  new.go,z.go" {
+		t.Errorf("reload re-reads expanded directories: %v", got)
+	}
+}
+
+func TestCapturingOnlyInViewerPrompt(t *testing.T) {
+	dir := fixture(t, map[string]int{"a.go": 1})
+	m := started(t, dir, 100, 24)
+	if m.Capturing() {
+		t.Fatal("the tree never captures")
+	}
+	m, _ = press(t, m, "/")
+	if m.Capturing() {
+		t.Error("/ in the tree is not a prompt")
+	}
+}
+
+func TestNoAIKeys(t *testing.T) {
+	dir := fixture(t, map[string]int{"a.go": 1})
+	for _, k := range []string{"a", "t"} {
+		m := started(t, dir, 100, 24)
+		if _, cmd := m.Update(keyMsg(k)); cmd != nil {
+			t.Errorf("%q on a file returned a command; the AI keys should be gone", k)
+		}
 	}
 }
 
 func TestMouseClickFocusesRegion(t *testing.T) {
 	dir := fixture(t, map[string]int{"a.go": 30, "b.go": 3})
-	m := started(t, dir, 90, 20)
+	m := started(t, dir, 100, 20)
 	click := func(x, y int) tea.MouseMsg {
 		return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
 	}
-	r := m.viewerRect()
+	r := m.layout().ViewerInner()
 	m, _ = m.Update(click(r.X+r.W/2, r.Y+3))
 	if m.focus != focusViewer {
 		t.Fatal("a click in the viewer should focus it")
@@ -301,79 +356,40 @@ func TestMouseClickFocusesRegion(t *testing.T) {
 	if m.viewer.Loc().Line != 2 {
 		t.Errorf("the click should place the viewer cursor on the clicked row, line = %d", m.viewer.Loc().Line)
 	}
-	m, _ = m.Update(click(1, ListTop))
-	if m.focus != focusList {
-		t.Error("a click on a list row should focus the list")
+	m, _ = m.Update(click(2, ListTop))
+	if m.focus != focusTree {
+		t.Error("a click on a tree row should focus the tree")
 	}
 }
 
-func TestRevealMsgSelectsAndGoes(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 1, "sub/c.go": 100})
-	m := started(t, dir, 90, 30)
-	target := filepath.Join(dir, "sub", "c.go")
-	m, cmd := m.Update(RevealMsg{Target: editor.Target{Path: target, Line: 50, Col: 3}})
+func TestClickOnMarkerTogglesAndDoubleClickOpens(t *testing.T) {
+	dir := fixture(t, map[string]int{"sub/a.go": 1, "z.go": 5})
+	m := started(t, dir, 100, 20)
+	click := tea.MouseMsg{X: 1, Y: ListTop, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+	m, _ = m.Update(click)
+	if len(m.tree.Rows()) != 3 {
+		t.Fatalf("a click on a directory's marker expands it: %v", rowNames(m.tree.Rows()))
+	}
+	row := tea.MouseMsg{X: 8, Y: ListTop + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+	m, _ = m.Update(row)
+	m, cmd := m.Update(row)
 	m, _ = settle(t, m, cmd)
-	if m.dir != filepath.Join(dir, "sub") || m.SelectedPath() != target {
-		t.Fatalf("reveal: dir=%q selected=%q", m.dir, m.SelectedPath())
-	}
-	if loc := m.viewer.Loc(); loc.Line != 49 || loc.Col != 2 || m.focus != focusViewer {
-		t.Errorf("reveal: viewer at %+v focus %d, want line 49 col 2 with viewer focus", loc, m.focus)
+	if m.SelectedPath() != filepath.Join(dir, "z.go") || m.focus != focusViewer {
+		t.Errorf("a double-click on a file opens it in the viewer: selected %q focus %d", m.SelectedPath(), m.focus)
 	}
 }
 
-func TestPerDirPositionRemembered(t *testing.T) {
-	dir := fixture(t, map[string]int{"sub/a.go": 3, "sub/b.go": 3, "sub/c.go": 50, "z.go": 1})
-	m := started(t, dir, 90, 30)
-	m, _ = press(t, m, "enter", "j", "j", "enter", "j", "j", "j", "j", "j", "esc", "h")
-	if m.dir != dir {
-		t.Fatalf("expected to be back at the root, dir = %q", m.dir)
+func TestLargeRootLoadsAsync(t *testing.T) {
+	defer func(n int) { bigDirEntries = n }(bigDirEntries)
+	bigDirEntries = 2
+	dir := fixture(t, map[string]int{"a.go": 1, "b.go": 1, "c.go": 1})
+	m := New(dir, config.Default())
+	m.SetSize(100, 20)
+	if len(m.tree.Rows()) != 0 || !strings.Contains(ansi.Strip(m.View()), "loading…") {
+		t.Fatal("a root over the cap is listed by a command, not in New")
 	}
-	m, _ = press(t, m, "enter")
-	if m.selectedName() != "c.go" {
-		t.Errorf("re-entering sub should select c.go again, got %q", m.selectedName())
-	}
-	if line := m.viewer.Loc().Line; line != 5 {
-		t.Errorf("the viewer should return to line 5 of c.go, got %d", line)
-	}
-}
-
-func TestReloadKeepsPosition(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 50})
-	m := started(t, dir, 90, 30)
-	m, _ = press(t, m, "enter", "j", "j", "j", "j")
-	m, cmd := m.Update(ReloadCurrent())
-	m, _ = settle(t, m, cmd)
-	if line := m.viewer.Loc().Line; line != 4 || !m.viewer.Loaded() {
-		t.Errorf("after reload the viewer should stay on line 4, got %d", line)
-	}
-}
-
-func TestDirectorySelectionShowsNote(t *testing.T) {
-	dir := fixture(t, map[string]int{"sub/a.go": 1})
-	m := started(t, dir, 90, 20)
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "sub/") {
-		t.Errorf("selecting a directory should say so in the viewer:\n%s", v)
-	}
-}
-
-func TestCapturingWhileFiltering(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 1})
-	m := started(t, dir, 80, 24)
-	if m.Capturing() {
-		t.Fatal("list focus without an active filter should not capture")
-	}
-	m, _ = m.Update(keyMsg("/"))
-	if !m.Capturing() {
-		t.Error("'/' should start the filter and capture the keyboard")
-	}
-}
-
-func TestNoAIKeys(t *testing.T) {
-	dir := fixture(t, map[string]int{"a.go": 1})
-	for _, k := range []string{"a", "t"} {
-		m := started(t, dir, 80, 24)
-		if _, cmd := m.Update(keyMsg(k)); cmd != nil {
-			t.Errorf("%q on a file returned a command; the AI keys should be gone", k)
-		}
+	m, _ = settle(t, m, m.Init())
+	if len(m.tree.Rows()) != 3 || !m.viewer.Loaded() {
+		t.Errorf("after Init: rows %v, viewer loaded %v", rowNames(m.tree.Rows()), m.viewer.Loaded())
 	}
 }
