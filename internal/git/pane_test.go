@@ -3,10 +3,15 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"deck/internal/ui"
 )
 
 func TestStyleLogKeepsContent(t *testing.T) {
@@ -151,6 +156,84 @@ func TestCommitAIHintHiddenWhenUnavailable(t *testing.T) {
 	}
 	if strings.Contains(off.commitBox.Placeholder, "ctrl+g") {
 		t.Error("placeholder should not advertise ctrl+g when the AI CLI is missing")
+	}
+}
+
+func fakeChanges(n int) []Change {
+	out := make([]Change, n)
+	for i := range out {
+		out[i] = Change{Staged: " ", Unstaged: "M", Path: fmt.Sprintf("dir/%s-%03d.go", strings.Repeat("long-name-", 6), i)}
+	}
+	return out
+}
+
+func TestViewIsExactlyTheOuterBox(t *testing.T) {
+	for _, size := range [][2]int{{60, 11}, {80, 19}, {200, 45}} {
+		p := NewPane("dracula", true)
+		p.changes = fakeChanges(80)
+		p.status = strings.Repeat("a very long status message ", 10)
+		p.SetSize(size[0], size[1])
+		for _, mode := range []string{"list", "commit"} {
+			if mode == "commit" {
+				p.committing = true
+			}
+			v := p.View()
+			if got := lipgloss.Height(v); got != size[1] {
+				t.Errorf("%v %s: height = %d, want %d", size, mode, got, size[1])
+			}
+			if got := lipgloss.Width(v); got > size[0] {
+				t.Errorf("%v %s: width = %d, want <= %d", size, mode, got, size[0])
+			}
+		}
+	}
+}
+
+func TestCursorRowStaysVisible(t *testing.T) {
+	p := NewPane("dracula", true)
+	p.changes = fakeChanges(60)
+	for i := range p.changes {
+		p.changes[i].Path = fmt.Sprintf("f-%03d.go", i)
+	}
+	p.SetSize(100, 14)
+	for range 40 {
+		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+	if p.cursor != 40 {
+		t.Fatalf("cursor = %d, want 40", p.cursor)
+	}
+	if v := ansi.Strip(p.View()); !strings.Contains(v, "f-040.go") {
+		t.Errorf("the cursor row scrolled out of view:\n%s", v)
+	}
+	for range 40 {
+		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	}
+	if v := ansi.Strip(p.View()); !strings.Contains(v, "f-000.go") {
+		t.Errorf("moving back to the top should show the first row:\n%s", v)
+	}
+}
+
+func TestCommitMsgErrorRaisesToast(t *testing.T) {
+	p := committingPane(t, true)
+	_, cmd := p.Update(CommitMsgReady{Err: errors.New("cli missing")})
+	var toast *ui.ToastMsg
+	for _, msg := range collect(cmd) {
+		if tm, ok := msg.(ui.ToastMsg); ok {
+			toast = &tm
+		}
+	}
+	if toast == nil || toast.Level != ui.LevelError || !strings.Contains(toast.Text, "cli missing") {
+		t.Errorf("a failed commit message should raise an error toast, got %+v", toast)
+	}
+	if _, cmd := p.Update(CommitMsgReady{Err: context.Canceled}); cmd != nil {
+		t.Error("a cancelled request should not raise a toast")
+	}
+}
+
+func TestMessagesRouteToGit(t *testing.T) {
+	for _, msg := range []ui.Routed{RefreshMsg{}, CommitMsgReady{}} {
+		if msg.RouteTo() != ui.DestGit {
+			t.Errorf("%T routes to %v, want DestGit", msg, msg.RouteTo())
+		}
 	}
 }
 

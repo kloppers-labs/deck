@@ -36,6 +36,8 @@ type RespMsg struct {
 	err         error
 }
 
+func (RespMsg) RouteTo() ui.Dest { return ui.DestHTTP }
+
 // focus enumerates the editable fields, cycled with ctrl+n / ctrl+p.
 const (
 	focusMethod = iota
@@ -104,24 +106,24 @@ func NewPane(theme string) Pane {
 	}
 }
 
-// SetSize lays out the request editors above the response viewport.
+const (
+	headersRows = 3
+	bodyRows    = 5
+	requestRows = 1 + (1 + headersRows) + (1 + bodyRows) + 1
+	respChrome  = 2
+)
+
+// SetSize sets the pane's outer box: request editors, status line, and the
+// bordered response, which takes whatever rows are left.
 func (p *Pane) SetSize(w, h int) {
 	p.width, p.height = w, h
-	p.url.Width = w - 12
-	p.headers.SetWidth(w - 4)
-	p.headers.SetHeight(3)
-	p.body.SetWidth(w - 4)
-	p.body.SetHeight(5)
-
-	// Rows above the response: URL line, two labelled editors, status, plus
-	// padding/borders. Whatever's left goes to the response viewport.
-	used := 1 + (1 + 3) + (1 + 5) + 1 + 4
-	rh := h - used
-	if rh < 3 {
-		rh = 3
-	}
-	p.resp.Width = w - 4
-	p.resp.Height = rh
+	p.url.Width = max(w-12, 1)
+	p.headers.SetWidth(max(w-4, 1))
+	p.headers.SetHeight(headersRows)
+	p.body.SetWidth(max(w-4, 1))
+	p.body.SetHeight(bodyRows)
+	p.resp.Width = max(w-4, 0)
+	p.resp.Height = max(h-requestRows-respChrome, 1)
 }
 
 // Capturing reports that the HTTP tab owns raw keystrokes (it has text inputs),
@@ -275,11 +277,12 @@ func (p Pane) View() string {
 	if p.sending {
 		status = p.spinner.View() + " " + p.status
 	}
-	return urlLine + "\n" +
+	view := urlLine + "\n" +
 		p.label("Headers", focusHeaders) + "\n" + p.headers.View() + "\n" +
 		p.label("Body", focusBody) + "\n" + p.body.View() + "\n" +
-		status + "\n" +
-		ui.Pane.Render(p.resp.View())
+		ui.FitWidth(status, p.width, "…") + "\n" +
+		ui.Pane.Render(ui.Fit(p.resp.View(), p.resp.Width, p.resp.Height))
+	return ui.Fit(view, p.width, p.height)
 }
 
 func (p Pane) methodView() string {

@@ -4,21 +4,31 @@
 package files
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/ui"
 )
+
+// ListTop is the row, local to the pane, where the first file row is drawn: the
+// path header, then the list's reserved filter row.
+const ListTop = 2
+
+const wheelLines = 3
 
 // OpenMsg asks the root model to open Path in the editor.
 type OpenMsg struct{ Path string }
@@ -49,6 +59,7 @@ func (fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item)
 	if e.isDir {
 		name += "/"
 	}
+	name = ui.FitWidth(name, m.Width()-2, "…")
 	if index == m.Index() {
 		fmt.Fprint(w, ui.Active.Render("› "+name))
 		return
@@ -65,11 +76,13 @@ const (
 
 // Model is the navigator state.
 type Model struct {
+	root    string
 	dir     string
 	list    list.Model
 	preview viewport.Model
 	focus   int
 	theme   string
+	clicks  ui.ClickTracker
 	width   int
 	height  int
 	err     error
@@ -90,7 +103,7 @@ func New(dir, theme string) Model {
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
 	l.KeyMap.Quit = key.Binding{} // deck's global "q" owns quit
-	m := Model{dir: dir, theme: theme, preview: viewport.New(0, 0), list: l}
+	m := Model{root: dir, dir: dir, theme: theme, preview: viewport.New(0, 0), list: l}
 	m.load()
 	return m
 }
@@ -130,7 +143,29 @@ func (m *Model) load() {
 	m.list.ResetFilter()
 	m.list.SetItems(items)
 	m.list.Select(0)
+	m.list.SetHeight(m.listHeight())
 	m.refreshPreview()
+}
+
+func (m Model) listHeight() int {
+	h := m.height - 1
+	if m.err != nil {
+		h--
+	}
+	return max(h, 0)
+}
+
+func (m Model) listWidth() int {
+	return max(m.width/3, 20)
+}
+
+// SelectedPath is the absolute path of the highlighted entry, or "" when the
+// directory is empty.
+func (m Model) SelectedPath() string {
+	if e, ok := m.selected(); ok {
+		return filepath.Join(m.dir, e.name)
+	}
+	return ""
 }
 
 func (m Model) selected() (entry, bool) {
@@ -163,17 +198,13 @@ func (m *Model) refreshPreview() {
 	m.preview.GotoTop()
 }
 
-// SetSize lays out the two panes side by side.
+// SetSize sets the pane's outer box: the list column plus the bordered preview.
 func (m *Model) SetSize(w, h int) {
 	m.width, m.height = w, h
-	listW := w / 3
-	if listW < 20 {
-		listW = 20
-	}
-	// The left column shows a dir header (2 rows) above the list.
-	m.list.SetSize(listW, h-3)
-	m.preview.Width = w - listW - 4
-	m.preview.Height = h - 2
+	listW := m.listWidth()
+	m.list.SetSize(listW, m.listHeight())
+	m.preview.Width = max(w-listW-4, 0)
+	m.preview.Height = max(h-2, 0)
 	m.refreshPreview()
 }
 
@@ -181,6 +212,9 @@ func (m *Model) SetSize(w, h int) {
 // "f" hands the keyboard to the preview viewport so the user can scroll it
 // without moving the file cursor; "esc" returns focus to the list.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		return m.mouse(mm)
+	}
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
 		var cmd tea.Cmd
@@ -244,10 +278,60 @@ func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-// Capturing reports that the keyboard is owned by something other than global
-// nav: the preview scroller, or the list's "/" filter input.
+func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	listW := m.listWidth()
+	if tea.MouseEvent(msg).IsWheel() {
+		down := msg.Button == tea.MouseButtonWheelDown
+		if msg.X >= listW {
+			if down {
+				m.preview.ScrollDown(wheelLines)
+			} else {
+				m.preview.ScrollUp(wheelLines)
+			}
+			return m, nil
+		}
+		prev := m.selectedName()
+		if down {
+			m.list.CursorDown()
+		} else {
+			m.list.CursorUp()
+		}
+		if m.selectedName() != prev {
+			m.refreshPreview()
+		}
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if msg.X >= listW {
+		m.focus = focusPreview
+		return m, nil
+	}
+	if m.list.FilterState() == list.Filtering {
+		return m, nil
+	}
+	row := msg.Y - ListTop
+	idx := m.list.Paginator.Page*m.list.Paginator.PerPage + row
+	if row < 0 || row >= m.list.Paginator.PerPage || idx >= len(m.list.VisibleItems()) {
+		return m, nil
+	}
+	m.focus = focusList
+	prev := m.selectedName()
+	m.list.Select(idx)
+	if m.selectedName() != prev {
+		m.refreshPreview()
+	}
+	if ui.IsDouble(m.clicks.Press(msg.X, msg.Y, time.Now())) {
+		return m.activate()
+	}
+	return m, nil
+}
+
+// Capturing reports that the "/" filter owns the keyboard. Reading the preview
+// never captures.
 func (m Model) Capturing() bool {
-	return m.focus == focusPreview || m.list.FilterState() == list.Filtering
+	return m.list.FilterState() == list.Filtering
 }
 
 // HelpBindings returns the Files-pane key hints shown in the help footer.
@@ -276,22 +360,43 @@ func (m Model) activate() (Model, tea.Cmd) {
 	return m, func() tea.Msg { return OpenMsg{Path: path} }
 }
 
-// View renders the listing and preview side by side.
+// View renders the listing and preview side by side, filling exactly the box
+// given to SetSize.
 func (m Model) View() string {
-	listW := m.width / 3
-	if listW < 20 {
-		listW = 20
-	}
-	header := ui.Muted.Render(m.dir)
+	listW := m.listWidth()
+	header := ui.Muted.Render(headerPath(m.root, m.dir, listW-1))
+	col := ui.Fit(header+"\n"+m.list.View(), listW, m.listHeight()+1)
 	if m.err != nil {
-		header += "\n" + ui.Err.Render(m.err.Error())
+		col += "\n" + ui.Err.Render(ui.FitWidth(loadError(m.err), listW-1, "…"))
 	}
-	col := lipgloss.JoinVertical(lipgloss.Left, header, "", m.list.View())
-	left := lipgloss.NewStyle().Width(listW).Height(m.height).Render(col)
 	paneStyle := ui.Pane
 	if m.focus == focusPreview {
 		paneStyle = ui.PaneActive
 	}
-	preview := paneStyle.Render(m.preview.View())
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, preview)
+	preview := paneStyle.Render(ui.Fit(m.preview.View(), m.preview.Width, m.preview.Height))
+	body := lipgloss.JoinHorizontal(lipgloss.Top, ui.Fit(col, listW, m.height), preview)
+	return ui.Fit(body, m.width, m.height)
+}
+
+// loadError drops the path from a listing error; the header already shows it.
+func loadError(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// headerPath shows dir relative to the launch root (prefixed with the root's
+// name), left-truncated to w columns so the deepest part stays visible.
+func headerPath(root, dir string, w int) string {
+	shown := dir
+	rel, err := filepath.Rel(root, dir)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		shown = filepath.Join(filepath.Base(root), rel)
+	}
+	if over := ansi.StringWidth(shown) - w; over > 0 {
+		shown = ansi.TruncateLeft(shown, over+1, "…")
+	}
+	return shown
 }

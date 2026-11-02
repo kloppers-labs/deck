@@ -123,6 +123,7 @@ func (d jobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	if e := j.elapsed(); e != "" {
 		line += ui.Muted.Render(" " + e)
 	}
+	line = ui.FitWidth(line, m.Width()-2, "…")
 	if index == m.Index() {
 		fmt.Fprint(w, ui.Active.Render("› ")+line)
 		return
@@ -178,18 +179,17 @@ func (p Pane) RunningCount() int {
 	return n
 }
 
-// SetSize lays out the list and output viewport.
+// SetSize sets the pane's outer box: the task list plus the bordered output.
 func (p *Pane) SetSize(w, h int) {
 	p.width, p.height = w, h
-	listW := w / 3
-	if listW < 24 {
-		listW = 24
-	}
+	listW := p.listWidth()
 	p.list.SetSize(listW, h)
-	p.view.Width = w - listW - 4
-	p.view.Height = h - 2
+	p.view.Width = max(w-listW-4, 0)
+	p.view.Height = max(h-2, 0)
 	p.refreshView()
 }
+
+func (p Pane) listWidth() int { return max(p.width/3, 24) }
 
 // Capturing reports whether raw keys should bypass global nav. The Run tab only
 // captures while the list's "/" filter is active.
@@ -394,12 +394,10 @@ func (p *Pane) stop() {
 	j.proc.stop()
 }
 
-// View renders the task list beside the selected task's output.
+// View renders the task list beside the selected task's output, filling exactly
+// the box given to SetSize.
 func (p Pane) View() string {
-	listW := p.width / 3
-	if listW < 24 {
-		listW = 24
-	}
-	left := lipgloss.NewStyle().Width(listW).Height(p.height).Render(p.list.View())
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, ui.Pane.Render(p.view.View()))
+	left := ui.Fit(p.list.View(), p.listWidth(), p.height)
+	right := ui.Pane.Render(ui.Fit(p.view.View(), p.view.Width, p.view.Height))
+	return ui.Fit(lipgloss.JoinHorizontal(lipgloss.Top, left, right), p.width, p.height)
 }

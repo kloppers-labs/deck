@@ -1,7 +1,5 @@
-// Package app is deck's root Bubble Tea model. It owns the tab bar, global
-// keymap, and help footer, and dispatches to the Files, Git, Run, and HTTP panes.
-// It also brokers cross-pane actions: opening files in micro and generating a
-// commit message from the staged diff.
+// Package app is deck's root Bubble Tea model: the chrome around the Files, Git,
+// Run and HTTP panes, message routing, and cross-pane actions.
 package app
 
 import (
@@ -18,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/aicommit"
 	"deck/internal/config"
@@ -41,36 +40,66 @@ const (
 
 var tabNames = []string{"Files", "Git", "Run", "HTTP"}
 
+var tabDests = [numTabs]ui.Dest{ui.DestFiles, ui.DestGit, ui.DestRun, ui.DestHTTP}
+
 const commitMsgTimeout = 90 * time.Second
+
+const (
+	tabBarHeight    = 3
+	statusBarHeight = 1
+	footerHeight    = 1
+	chromeHeight    = tabBarHeight + statusBarHeight + footerHeight
+	minWidth        = 60
+	minHeight       = 16
+	maxToasts       = 8
+)
 
 // editorClosedMsg fires when the launched editor exits and deck regains the TTY.
 type editorClosedMsg struct{ err error }
 
-// Model is the top-level application state.
-type Model struct {
-	cfg      config.Config
-	project  string
-	active   tab
-	files    files.Model
-	git      git.Pane
-	run      runner.Pane
-	httpc    httpc.Pane
-	help     help.Model
-	showHelp bool
-	width    int
-	height   int
+type toastExpireMsg struct{ id int }
+
+type toast struct {
+	id  int
+	msg ui.ToastMsg
 }
 
-// New builds the root model from loaded config.
-func New(cfg config.Config) Model {
+type cell struct{ x, y int }
+
+// Model is the top-level application state.
+type Model struct {
+	cfg        config.Config
+	warnings   []config.Warning
+	project    string
+	active     tab
+	files      files.Model
+	git        git.Pane
+	run        runner.Pane
+	httpc      httpc.Pane
+	keyHelp    help.Model
+	help       helpState
+	toasts     []toast
+	toastSeq   int
+	mouseOn    bool
+	lastMotion *cell
+	width      int
+	height     int
+}
+
+// New builds the root model from loaded config. warnings are shown as a toast
+// once the program starts.
+func New(cfg config.Config, warnings []config.Warning) Model {
 	return Model{
-		cfg:     cfg,
-		project: projectName(),
-		files:   files.New("", cfg.Theme),
-		git:     git.NewPane(cfg.Theme, aicommit.Available(cfg.AIBackend)),
-		run:     runner.NewPane(cfg.Tasks, ""),
-		httpc:   httpc.NewPane(cfg.Theme),
-		help:    newHelp(),
+		cfg:      cfg,
+		warnings: warnings,
+		project:  projectName(),
+		files:    files.New("", cfg.Theme),
+		git:      git.NewPane(cfg.Theme, aicommit.Available(cfg.AIBackend)),
+		run:      runner.NewPane(cfg.Tasks, ""),
+		httpc:    httpc.NewPane(cfg.Theme),
+		keyHelp:  newKeyHelp(),
+		help:     newHelpState(),
+		mouseOn:  cfg.Mouse != "off",
 	}
 }
 
@@ -82,8 +111,7 @@ func projectName() string {
 	return filepath.Base(wd)
 }
 
-// newHelp builds the help view styled with deck's Dracula palette.
-func newHelp() help.Model {
+func newKeyHelp() help.Model {
 	h := help.New()
 	keyStyle := lipgloss.NewStyle().Foreground(ui.ColorAccent)
 	descStyle := lipgloss.NewStyle().Foreground(ui.ColorMuted)
@@ -91,30 +119,34 @@ func newHelp() help.Model {
 	h.Styles.FullKey = keyStyle
 	h.Styles.ShortDesc = descStyle
 	h.Styles.FullDesc = descStyle
+	h.Styles.ShortSeparator = descStyle
 	return h
 }
 
-func (m Model) Init() tea.Cmd { return nil }
-
-// Rows reserved around the pane body: the bordered tab bar, the status bar,
-// the help footer, and slack for pane borders.
-const (
-	tabBarHeight    = 3
-	statusBarHeight = 1
-	footerHeight    = 1
-	paneSlack       = 2
-	chromeHeight    = tabBarHeight + statusBarHeight + footerHeight + paneSlack
-)
+func (m Model) Init() tea.Cmd {
+	if len(m.warnings) == 0 {
+		return nil
+	}
+	text := "config: " + m.warnings[0].String()
+	if n := len(m.warnings) - 1; n > 0 {
+		text += fmt.Sprintf(" (+%d more)", n)
+	}
+	return func() tea.Msg {
+		return ui.ToastMsg{Level: ui.LevelWarn, Text: text, TTL: 12 * time.Second}
+	}
+}
 
 func (m *Model) resize(w, h int) {
 	m.width, m.height = w, h
-	m.help.Width = w
-	paneH := h - chromeHeight
+	m.keyHelp.Width = w
+	paneH := max(h-chromeHeight, 1)
 	m.files.SetSize(w, paneH)
 	m.git.SetSize(w, paneH)
 	m.run.SetSize(w, paneH)
 	m.httpc.SetSize(w, paneH)
 }
+
+func (m Model) bodyHeight() int { return m.height - chromeHeight }
 
 func (m Model) capturing() bool {
 	switch m.active {
@@ -135,8 +167,8 @@ func (m Model) focusCmd() tea.Cmd {
 	return nil
 }
 
-// Update routes global keys and cross-pane messages, delegating the rest to the
-// active pane.
+// Update handles global keys, mouse translation and app-level messages, and
+// delivers every ui.Routed message to its destination whichever tab is active.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -148,6 +180,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case tea.MouseMsg:
+		return m.mouse(msg)
+
 	case files.OpenMsg:
 		c := editor.Command(m.cfg.Editor, msg.Path)
 		return m, tea.ExecProcess(c, func(err error) tea.Msg {
@@ -158,27 +193,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, generateCommitMsg(msg.Ctx, m.cfg.AIBackend, m.cfg.AIModel)
 
 	case editorClosedMsg:
+		if msg.err != nil {
+			return m, tea.Batch(git.Refresh, ui.Toast(ui.LevelError, "editor: "+msg.err.Error()))
+		}
 		return m, git.Refresh
 
-	// Routed by type, not by the active tab, so these land whichever tab is showing.
-	case git.RefreshMsg, git.CommitMsgReady:
-		var cmd tea.Cmd
-		m.git, cmd = m.git.Update(msg)
-		return m, cmd
+	case toastExpireMsg:
+		m.toasts = withoutToast(m.toasts, msg.id)
+		return m, nil
 
-	case runner.OutputMsg, runner.ExitMsg:
-		var cmd tea.Cmd
-		m.run, cmd = m.run.Update(msg)
-		return m, cmd
-
-	case httpc.RespMsg:
-		var cmd tea.Cmd
-		m.httpc, cmd = m.httpc.Update(msg)
-		return m, cmd
-
-	// Spinner ticks animate regardless of the active tab. Each pane owns its own
-	// spinner; the tick's ID means only the owning spinner advances, so fanning
-	// the message out to every pane is safe and never amplifies the tick rate.
+	// Each pane's spinner only advances on its own tick ID, so fanning out is safe.
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
 		var cmd tea.Cmd
@@ -189,23 +213,85 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.run, cmd = m.run.Update(msg)
 		cmds = append(cmds, cmd)
 		return m, tea.Batch(cmds...)
+
+	case ui.Routed:
+		return m.routeTo(msg.RouteTo(), msg)
 	}
 
-	return m.routeToPane(msg)
+	return m.routeTo(tabDests[m.active], msg)
+}
+
+func (m Model) routeTo(dest ui.Dest, msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch dest {
+	case ui.DestApp:
+		if t, ok := msg.(ui.ToastMsg); ok {
+			return m.addToast(t)
+		}
+	case ui.DestFiles:
+		m.files, cmd = m.files.Update(msg)
+	case ui.DestGit:
+		m.git, cmd = m.git.Update(msg)
+	case ui.DestRun:
+		m.run, cmd = m.run.Update(msg)
+	case ui.DestHTTP:
+		m.httpc, cmd = m.httpc.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m Model) addToast(t ui.ToastMsg) (Model, tea.Cmd) {
+	m.toastSeq++
+	id := m.toastSeq
+	next := append([]toast(nil), m.toasts...)
+	next = append(next, toast{id: id, msg: t})
+	if len(next) > maxToasts {
+		next = next[len(next)-maxToasts:]
+	}
+	m.toasts = next
+	return m, tea.Tick(t.Lifetime(), func(time.Time) tea.Msg { return toastExpireMsg{id: id} })
+}
+
+func withoutToast(ts []toast, id int) []toast {
+	var out []toast
+	for _, t := range ts {
+		if t.id != id {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (m *Model) jump(t tab) tea.Cmd {
+	m.active = t
+	return m.focusCmd()
 }
 
 func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
-	// ctrl+c and tab navigation win before the capturing gate, so they work even
-	// while a pane owns the keyboard.
-	switch {
-	case key.Matches(msg, ui.Keys.ForceQuit):
+	if key.Matches(msg, ui.Keys.ForceQuit) {
 		return tea.Quit, true
+	}
+	if m.help.open {
+		return m.helpKey(msg), true
+	}
+	switch {
 	case key.Matches(msg, ui.Keys.Tab):
-		m.active = (m.active + 1) % numTabs
-		return m.focusCmd(), true
+		return m.jump((m.active + 1) % numTabs), true
 	case key.Matches(msg, ui.Keys.PrevTab):
-		m.active = (m.active + numTabs - 1) % numTabs
-		return m.focusCmd(), true
+		return m.jump((m.active + numTabs - 1) % numTabs), true
+	case key.Matches(msg, ui.Keys.AltFiles):
+		return m.jump(tabFiles), true
+	case key.Matches(msg, ui.Keys.AltGit):
+		return m.jump(tabGit), true
+	case key.Matches(msg, ui.Keys.AltRun):
+		return m.jump(tabRun), true
+	case key.Matches(msg, ui.Keys.AltHTTP):
+		return m.jump(tabHTTP), true
+	case key.Matches(msg, ui.Keys.HelpAlways):
+		m.openHelp()
+		return nil, true
+	case key.Matches(msg, ui.Keys.ToggleMouse):
+		return m.toggleMouse(), true
 	}
 	if m.capturing() {
 		return nil, false
@@ -214,38 +300,30 @@ func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case key.Matches(msg, ui.Keys.Quit):
 		return tea.Quit, true
 	case key.Matches(msg, ui.Keys.Help):
-		m.showHelp = !m.showHelp
-		m.help.ShowAll = m.showHelp
+		m.openHelp()
 		return nil, true
 	case key.Matches(msg, ui.Keys.Files):
-		m.active = tabFiles
-		return m.focusCmd(), true
+		return m.jump(tabFiles), true
 	case key.Matches(msg, ui.Keys.Git):
-		m.active = tabGit
-		return m.focusCmd(), true
+		return m.jump(tabGit), true
 	case key.Matches(msg, ui.Keys.Run):
-		m.active = tabRun
-		return m.focusCmd(), true
+		return m.jump(tabRun), true
 	case key.Matches(msg, ui.Keys.HTTP):
-		m.active = tabHTTP
-		return m.focusCmd(), true
+		return m.jump(tabHTTP), true
 	}
 	return nil, false
 }
 
-func (m Model) routeToPane(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	switch m.active {
-	case tabFiles:
-		m.files, cmd = m.files.Update(msg)
-	case tabGit:
-		m.git, cmd = m.git.Update(msg)
-	case tabRun:
-		m.run, cmd = m.run.Update(msg)
-	case tabHTTP:
-		m.httpc, cmd = m.httpc.Update(msg)
+func (m *Model) toggleMouse() tea.Cmd {
+	m.mouseOn = !m.mouseOn
+	m.lastMotion = nil
+	switch {
+	case !m.mouseOn:
+		return tea.DisableMouse
+	case m.cfg.Mouse == "click":
+		return tea.EnableMouseCellMotion
 	}
-	return m, cmd
+	return tea.EnableMouseAllMotion
 }
 
 func generateCommitMsg(parent context.Context, backend, model string) tea.Cmd {
@@ -270,44 +348,59 @@ func generateCommitMsg(parent context.Context, backend, model string) tea.Cmd {
 	}
 }
 
-// View renders the tab bar, the active pane (or full help), the status bar,
-// and the help footer.
+// View renders exactly width×height cells: the tab bar, the active pane (with
+// the help modal over it when open), the status bar and the key footer.
 func (m Model) View() string {
-	body := m.paneView()
-	if m.showHelp {
-		body = m.helpView()
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+	if m.width < minWidth || m.height < minHeight {
+		msg := fmt.Sprintf("terminal too small (%dx%d, need %dx%d)", m.width, m.height, minWidth, minHeight)
+		return ui.Fit(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg), m.width, m.height)
+	}
+	body := ui.Fit(m.paneView(), m.width, m.bodyHeight())
+	if m.help.open {
+		body = m.helpOverlay(body)
 	}
 	frame := strings.Join([]string{
-		m.tabBar(),
+		ui.Fit(m.tabBar(), m.width, tabBarHeight),
 		body,
-		m.statusBar(),
-		m.footer(),
+		ui.Fit(m.statusBar(), m.width, statusBarHeight),
+		ui.Fit(m.footer(), m.width, footerHeight),
 	}, "\n")
-	// Last line of defence: a pane that surfaces externally-sourced bytes (a
-	// binary file preview, a command's raw output, an HTTP body) can otherwise
-	// leak cursor-movement escapes or control bytes that scribble over the tab
-	// bar. Strip them here so the chrome always survives.
 	return ui.SanitizeTerminal(frame)
+}
+
+func (m Model) tabLabels() []string {
+	labels := make([]string, len(tabNames))
+	for i, name := range tabNames {
+		if tab(i) == tabRun {
+			if n := m.run.RunningCount(); n > 0 {
+				name += lipgloss.NewStyle().Foreground(ui.ColorString).Render(fmt.Sprintf("(%d)", n))
+			}
+		}
+		if tab(i) == m.active {
+			labels[i] = ui.TabActive.Render(name)
+		} else {
+			labels[i] = ui.TabInactive.Render(name)
+		}
+	}
+	return labels
+}
+
+func (m Model) tabWidths() []int {
+	labels := m.tabLabels()
+	widths := make([]int, len(labels))
+	for i, l := range labels {
+		widths[i] = lipgloss.Width(l)
+	}
+	return widths
 }
 
 // tabBar renders bordered tabs; the Run tab carries a live running-count badge
 // so background processes stay visible from every tab.
 func (m Model) tabBar() string {
-	var parts []string
-	for i, name := range tabNames {
-		if tab(i) == tabRun {
-			if n := m.run.RunningCount(); n > 0 {
-				name += lipgloss.NewStyle().Foreground(ui.ColorString).
-					Render(fmt.Sprintf("(%d)", n))
-			}
-		}
-		if tab(i) == m.active {
-			parts = append(parts, ui.TabActive.Render(name))
-		} else {
-			parts = append(parts, ui.TabInactive.Render(name))
-		}
-	}
-	row := lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
+	row := lipgloss.JoinHorizontal(lipgloss.Bottom, m.tabLabels()...)
 	if gap := m.width - lipgloss.Width(row); gap > 0 {
 		rule := ui.Muted.Render(strings.Repeat("─", gap))
 		row = lipgloss.JoinHorizontal(lipgloss.Bottom, row, rule)
@@ -315,15 +408,17 @@ func (m Model) tabBar() string {
 	return row
 }
 
-// statusBar renders the persistent project-state line: project, branch, dirty
-// count, and running processes.
 func (m Model) statusBar() string {
-	line := statusLine(m.project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
-	return ui.StatusBar.Width(m.width).Render(line)
+	left := statusLeft(m.project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
+	var right []string
+	if n := len(m.toasts); n > 0 {
+		right = append(right, m.toasts[n-1].msg.Render())
+	}
+	inner := max(m.width-ui.StatusBar.GetHorizontalFrameSize(), 0)
+	return ui.StatusBar.Render(statusLine(left, right, inner))
 }
 
-// statusLine assembles the status-bar text; pure so it can be unit-tested.
-func statusLine(project, branch string, dirty, running int) string {
+func statusLeft(project, branch string, dirty, running int) []string {
 	parts := []string{project}
 	if branch != "" {
 		parts = append(parts, "⎇ "+branch)
@@ -334,7 +429,20 @@ func statusLine(project, branch string, dirty, running int) string {
 	if running > 0 {
 		parts = append(parts, fmt.Sprintf("▶ %d running", running))
 	}
-	return strings.Join(parts, " · ")
+	return parts
+}
+
+// statusLine truncates the left side first so toasts and badges stay readable.
+func statusLine(left, right []string, w int) string {
+	r := ui.FitWidth(strings.Join(right, "  "), w, "…")
+	rw := ansi.StringWidth(r)
+	gap := 1
+	if rw == 0 {
+		gap = 0
+	}
+	l := ui.FitWidth(strings.Join(left, " · "), w-rw-gap, "…")
+	pad := max(w-ansi.StringWidth(l)-rw, 0)
+	return l + strings.Repeat(" ", pad) + r
 }
 
 func (m Model) paneView() string {
@@ -351,22 +459,6 @@ func (m Model) paneView() string {
 	return ""
 }
 
-// helpKeys adapts the active pane's bindings plus deck's global navigation to
-// the help.KeyMap interface: ShortHelp drives the one-line footer, FullHelp the
-// expanded view toggled with "?".
-type helpKeys struct {
-	pane []key.Binding
-}
-
-func (h helpKeys) ShortHelp() []key.Binding {
-	return append(append([]key.Binding{}, h.pane...), ui.Keys.Tab, ui.Keys.Help, ui.Keys.Quit)
-}
-
-func (h helpKeys) FullHelp() [][]key.Binding {
-	return [][]key.Binding{h.pane, ui.Keys.NavBindings(), ui.Keys.GlobalBindings()}
-}
-
-// paneBindings returns the active pane's help bindings.
 func (m Model) paneBindings() []key.Binding {
 	switch m.active {
 	case tabFiles:
@@ -381,12 +473,24 @@ func (m Model) paneBindings() []key.Binding {
 	return nil
 }
 
-// footer renders the one-line short help for the active pane plus global keys.
-func (m Model) footer() string {
-	return m.help.ShortHelpView(helpKeys{pane: m.paneBindings()}.ShortHelp())
+var mouseOffHint = key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("alt+m", "mouse off"))
+
+func (m Model) footerBindings() []key.Binding {
+	if m.help.open {
+		return helpFooter
+	}
+	var b []key.Binding
+	if !m.mouseOn {
+		b = append(b, mouseOffHint)
+	}
+	b = append(b, m.paneBindings()...)
+	b = append(b, ui.Keys.Tab)
+	if m.capturing() {
+		return append(b, ui.Keys.Normal)
+	}
+	return append(b, ui.Keys.Help, ui.Keys.Quit)
 }
 
-// helpView renders the expanded help shown in the body when "?" is toggled.
-func (m Model) helpView() string {
-	return m.help.FullHelpView(helpKeys{pane: m.paneBindings()}.FullHelp())
+func (m Model) footer() string {
+	return m.keyHelp.ShortHelpView(m.footerBindings())
 }

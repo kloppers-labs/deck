@@ -7,8 +7,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"deck/internal/config"
+	"deck/internal/ui"
 )
 
 // fakeStart replaces startProc with an inert fake, returning the recorded
@@ -23,6 +25,36 @@ func fakeStart(t *testing.T) *[]int {
 	}
 	t.Cleanup(func() { startProc = orig })
 	return &gens
+}
+
+func TestMessagesRouteToRun(t *testing.T) {
+	for _, msg := range []ui.Routed{OutputMsg{}, ExitMsg{}} {
+		if msg.RouteTo() != ui.DestRun {
+			t.Errorf("%T routes to %v, want DestRun", msg, msg.RouteTo())
+		}
+	}
+}
+
+func TestViewIsExactlyTheOuterBox(t *testing.T) {
+	fakeStart(t)
+	long := strings.Repeat("a-long-task-name-", 6)
+	var tasks []config.Task
+	for range 40 {
+		tasks = append(tasks, config.Task{Name: long, Cmd: "echo " + long})
+	}
+	for _, size := range [][2]int{{60, 11}, {80, 19}, {200, 45}} {
+		p := NewPane(tasks, "")
+		p.SetSize(size[0], size[1])
+		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		p, _ = p.Update(OutputMsg{idx: 0, gen: 1, text: strings.Repeat("y", 400) + "\n"})
+		v := p.View()
+		if got := lipgloss.Height(v); got != size[1] {
+			t.Errorf("%v: height = %d, want %d", size, got, size[1])
+		}
+		if got := lipgloss.Width(v); got > size[0] {
+			t.Errorf("%v: width = %d, want <= %d", size, got, size[0])
+		}
+	}
 }
 
 func testPane() Pane {
