@@ -1,50 +1,62 @@
 package runner
 
-import "strings"
-
-// Caps for a job's retained output. Long-running dev servers stream
-// indefinitely, so the buffer keeps a recent window rather than growing
-// without bound.
 const (
 	maxLogBytes = 256 * 1024
 	maxLogLines = 5000
 )
 
-// logBuf is a chunk-oriented capped buffer. The runner's scanner appends whole
-// lines, so trimming never cuts an ANSI escape mid-sequence; String prepends a
-// reset once trimmed so a dropped line's unclosed colour can't bleed into what
-// remains.
+// logBuf is a capped line buffer addressed by absolute line numbers that stay
+// stable when old lines are trimmed from the front.
 type logBuf struct {
 	lines   []string
 	bytes   int
-	trimmed bool
+	dropped int
+	open    bool
 }
 
-func (b *logBuf) Append(chunk string) {
-	b.lines = append(b.lines, chunk)
-	b.bytes += len(chunk)
+// Append adds a chunk, overwriting the last line after a bare carriage return,
+// and returns the line's absolute index and whether it overwrote one.
+func (b *logBuf) Append(c chunk) (int, bool) {
+	if b.open && len(b.lines) > 0 {
+		b.open = c.cr
+		last := len(b.lines) - 1
+		if c.text == "" {
+			return b.dropped + last, false
+		}
+		b.bytes += len(c.text) - len(b.lines[last])
+		b.lines[last] = c.text
+		return b.dropped + last, true
+	}
+	b.open = c.cr
+	b.lines = append(b.lines, c.text)
+	b.bytes += len(c.text) + 1
+	b.trim()
+	return b.End() - 1, false
+}
+
+func (b *logBuf) trim() {
 	if b.bytes <= maxLogBytes && len(b.lines) <= maxLogLines {
 		return
 	}
-	// Drop the oldest ~10% in one copy so trims stay amortized.
 	drop := max(1, len(b.lines)/10)
 	for _, l := range b.lines[:drop] {
-		b.bytes -= len(l)
+		b.bytes -= len(l) + 1
 	}
 	b.lines = append(b.lines[:0], b.lines[drop:]...)
-	b.trimmed = true
+	b.dropped += drop
 }
 
-func (b *logBuf) String() string {
-	s := strings.Join(b.lines, "")
-	if b.trimmed {
-		return "\x1b[0m" + s
+func (b *logBuf) Len() int   { return len(b.lines) }
+func (b *logBuf) First() int { return b.dropped }
+func (b *logBuf) End() int   { return b.dropped + len(b.lines) }
+
+// Line returns the line at absolute index i, or "" when it is out of range.
+func (b *logBuf) Line(i int) string {
+	i -= b.dropped
+	if i < 0 || i >= len(b.lines) {
+		return ""
 	}
-	return s
+	return b.lines[i]
 }
 
-func (b *logBuf) Reset() {
-	b.lines = nil
-	b.bytes = 0
-	b.trimmed = false
-}
+func (b *logBuf) Reset() { *b = logBuf{} }

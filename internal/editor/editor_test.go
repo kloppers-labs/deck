@@ -1,117 +1,74 @@
 package editor
 
 import (
-	"os"
-	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"deck/internal/ui"
 )
 
-// redirectConfigHome points configHome at a temp dir for the duration of a test.
-func redirectConfigHome(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "micro")
-	prev := configHome
-	configHome = func() (string, error) { return dir, nil }
-	t.Cleanup(func() { configHome = prev })
-	return dir
-}
-
-func TestPrepareWritesColorscheme(t *testing.T) {
-	dir := redirectConfigHome(t)
-	got, err := Prepare()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != dir {
-		t.Errorf("Prepare() = %q, want %q", got, dir)
-	}
-	cs := filepath.Join(dir, "colorschemes", "dracula.micro")
-	if _, err := os.Stat(cs); err != nil {
-		t.Errorf("colorscheme not written: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "settings.json")); err != nil {
-		t.Errorf("settings.json not written: %v", err)
-	}
-}
-
-func TestPrepareDoesNotClobberSettings(t *testing.T) {
-	dir := redirectConfigHome(t)
-	if _, err := Prepare(); err != nil {
-		t.Fatal(err)
-	}
-	settings := filepath.Join(dir, "settings.json")
-	custom := []byte(`{"colorscheme":"dracula","tabsize":2}`)
-	if err := os.WriteFile(settings, custom, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Prepare(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(settings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(custom) {
-		t.Errorf("settings.json was overwritten: %s", got)
-	}
-}
-
-func TestCommandMicroForcesTheme(t *testing.T) {
-	redirectConfigHome(t)
-	c := Command("micro", "/tmp/file.go")
-	if !strings.Contains(strings.Join(c.Args, " "), "-colorscheme dracula") {
-		t.Errorf("micro command missing colorscheme flag: %v", c.Args)
-	}
-	var sawConfigHome, sawTrueColor bool
-	for _, e := range c.Env {
-		if strings.HasPrefix(e, "MICRO_CONFIG_HOME=") {
-			sawConfigHome = true
-		}
-		if e == "MICRO_TRUECOLOR=1" {
-			sawTrueColor = true
+func envValue(env []string, key string) (string, bool) {
+	var val string
+	var found bool
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == key {
+			val, found = v, true
 		}
 	}
-	if !sawConfigHome || !sawTrueColor {
-		t.Errorf("micro command missing env: config_home=%v truecolor=%v", sawConfigHome, sawTrueColor)
+	return val, found
+}
+
+func TestLaunchMicroAddsColorschemeWithBundle(t *testing.T) {
+	c, mode, _ := Launch("micro", Target{Path: "/tmp/file.go", Line: 2}, Opts{ConfigDir: "/cfg/micro"})
+	if mode != Suspend {
+		t.Errorf("micro mode = %v, want Suspend", mode)
+	}
+	want := []string{"micro", "-colorscheme", "dracula", "+2", "/tmp/file.go"}
+	if !slices.Equal(c.Args, want) {
+		t.Errorf("args = %q, want %q", c.Args, want)
+	}
+	if v, _ := envValue(c.Env, "MICRO_CONFIG_HOME"); v != "/cfg/micro" {
+		t.Errorf("MICRO_CONFIG_HOME = %q, want /cfg/micro", v)
 	}
 }
 
-func TestCommandPassesThroughArgs(t *testing.T) {
-	redirectConfigHome(t)
-	c := Command("vim -u NONE", "/tmp/file.go")
-	want := []string{"vim", "-u", "NONE", "/tmp/file.go"}
-	if len(c.Args) != len(want) {
-		t.Fatalf("args = %v, want %v", c.Args, want)
-	}
-	for i, a := range want {
-		if c.Args[i] != a {
-			t.Errorf("arg %d = %q, want %q", i, c.Args[i], a)
-		}
-	}
-}
-
-func TestCommandMicroRespectsUserColorscheme(t *testing.T) {
-	redirectConfigHome(t)
-	c := Command("micro -colorscheme gruvbox", "/tmp/file.go")
+func TestLaunchMicroRespectsUserColorscheme(t *testing.T) {
+	c, _, _ := Launch("micro -colorscheme gruvbox", Target{Path: "/tmp/file.go"}, Opts{ConfigDir: "/cfg/micro"})
 	joined := strings.Join(c.Args, " ")
-	if strings.Contains(joined, "dracula") {
+	if strings.Contains(joined, "dracula") || !strings.Contains(joined, "-colorscheme gruvbox") {
 		t.Errorf("user-supplied colorscheme should win, got %v", c.Args)
 	}
-	if !strings.Contains(joined, "-colorscheme gruvbox") {
-		t.Errorf("user colorscheme flag lost: %v", c.Args)
+}
+
+func TestLaunchMicroWithoutBundleIsPlain(t *testing.T) {
+	c, _, _ := Launch("micro", Target{Path: "/tmp/file.go", Line: 4, Col: 2}, Opts{Environ: []string{"TERM=xterm"}})
+	if want := []string{"micro", "+4:2", "/tmp/file.go"}; !slices.Equal(c.Args, want) {
+		t.Errorf("args = %q, want %q", c.Args, want)
+	}
+	if _, ok := envValue(c.Env, "MICRO_CONFIG_HOME"); ok {
+		t.Error("without the bundle micro should use the user's own config")
 	}
 }
 
-func TestCommandOtherEditorIsPlain(t *testing.T) {
-	redirectConfigHome(t)
-	c := Command("vim", "/tmp/file.go")
-	if joined := strings.Join(c.Args, " "); strings.Contains(joined, "-colorscheme") {
-		t.Errorf("non-micro editor should not get colorscheme flags: %v", c.Args)
+func TestLaunchOtherEditorIsPlain(t *testing.T) {
+	c, _, _ := Launch("vim -u NONE", Target{Path: "/tmp/file.go", Line: 12, Col: 5}, Opts{ConfigDir: "/cfg/micro", StateFile: "/tmp/s"})
+	if want := []string{"vim", "-u", "NONE", "+call cursor(12,5)", "/tmp/file.go"}; !slices.Equal(c.Args, want) {
+		t.Errorf("args = %q, want %q", c.Args, want)
 	}
-	for _, e := range c.Env {
-		if strings.HasPrefix(e, "MICRO_CONFIG_HOME=") {
-			t.Errorf("non-micro editor should not get MICRO_CONFIG_HOME: %v", c.Env)
-		}
+	if c.Env != nil {
+		t.Errorf("non-micro editors inherit the environment unchanged, got %v", c.Env)
+	}
+}
+
+func TestLaunchNeedsAPath(t *testing.T) {
+	if _, _, err := Launch("micro", Target{}, Opts{}); err == nil {
+		t.Error("Launch without a path should fail")
+	}
+}
+
+func TestOpenMsgRoutesToApp(t *testing.T) {
+	if got := (OpenMsg{}).RouteTo(); got != ui.DestApp {
+		t.Errorf("OpenMsg.RouteTo = %v, want DestApp", got)
 	}
 }

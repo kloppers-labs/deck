@@ -1,97 +1,126 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
+	"time"
 
-	"github.com/alecthomas/chroma/v2/formatters"
-	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
 
+	"deck/internal/editor"
 	"deck/internal/ui"
 )
 
-// GenCommitMsgRequest asks the root model to generate a commit message from the
-// staged diff via the AI pane. The app replies with CommitMsgReady.
-type GenCommitMsgRequest struct{}
+const (
+	diffDebounce  = 50 * time.Millisecond
+	maxCachedDiff = 256
+	wheelStep     = 3
+)
 
-// CommitMsgReady carries an AI-generated commit message back into the pane.
-type CommitMsgReady struct{ Text string }
-
-// refreshMsg triggers a status reload.
-type refreshMsg struct{}
-
-// Refresh is a command that reloads git status; the app fires it when the Git
-// tab gains focus.
-func Refresh() tea.Msg { return refreshMsg{} }
-
-// branchItem adapts a branch name to list.Item for the picker.
-type branchItem string
-
-func (b branchItem) FilterValue() string { return string(b) }
-
-// branchDelegate renders one branch row, marking the checked-out branch.
-type branchDelegate struct{ current string }
-
-func (branchDelegate) Height() int                         { return 1 }
-func (branchDelegate) Spacing() int                        { return 0 }
-func (branchDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
-
-func (d branchDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	b, ok := item.(branchItem)
-	if !ok {
-		return
-	}
-	name := string(b)
-	if name == d.current {
-		name += lipgloss.NewStyle().Foreground(ui.ColorString).Render(" ✓")
-	}
-	if index == m.Index() {
-		fmt.Fprint(w, ui.Active.Render("› "+name))
-		return
-	}
-	fmt.Fprint(w, "  "+name)
+// Options configures the Git tab. Dir is where the repository is looked up; "" is the cwd.
+type Options struct {
+	Theme         string
+	CommitAI      bool
+	ConfirmCommit bool
+	Dir           string
 }
 
-// Pane is deck's Git tab: a change list on the left, a highlighted diff on the
-// right, plus staging, committing, a branch picker, and a commit-log view.
+type focus int
+
+const (
+	focusList focus = iota
+	focusDiff
+)
+
+type mode int
+
+const (
+	modeChanges mode = iota
+	modeLog
+)
+
+type cachedDiff struct{ raw, rendered string }
+
+type confirmPrompt struct {
+	text string
+	run  func(Pane) (Pane, tea.Cmd)
+}
+
+// Pane is deck's Git tab: sectioned changes or the log on the left, the diff on
+// the right. Every git call runs as a command; the pane never blocks.
 type Pane struct {
-	changes    []Change
-	cursor     int
-	diff       viewport.Model
-	branch     string
+	opts Options
+	repo *Repo
+	snap Snapshot
+
+	items   []Item
+	rows    []row
+	cursor  int
+	offset  int
+	focus   focus
+	mode    mode
+	notRepo bool
+
+	statusSeq  int
+	loading    bool
+	reloads    int
+	indexStamp int64
+	stamps     map[string]int64
+
+	diff     viewport.Model
+	diffSeq  int
+	cache    map[diffKey]cachedDiff
+	shownKey diffKey
+	rawDiff  string
+
 	committing bool
 	confirming bool
-	commitBox  textinput.Model
+	amend      bool
+	box        textarea.Model
 	commitText string
 	confirm    *huh.Confirm
 	confirmVal *bool
-	branching  bool
-	branchList list.Model
-	showLog    bool
-	status     string
-	theme      string
-	err        error
-	width      int
-	height     int
+	generating bool
+	cancelGen  *context.CancelFunc
+
+	branching      bool
+	branchesLoaded bool
+	naming         bool
+	branchList     list.Model
+	nameInput      textinput.Model
+
+	logList   list.Model
+	logLoaded bool
+
+	pending *confirmPrompt
+	busy    string
+	busyOp  string
+	spin    spinner.Model
+
+	status    string
+	statusErr bool
+	width     int
+	height    int
 }
 
-// NewPane builds the Git tab. theme is the chroma style name for diff
-// highlighting.
-func NewPane(theme string) Pane {
-	ti := textinput.New()
-	ti.Placeholder = "commit message (Enter to confirm, Esc to cancel, ctrl+g for AI)"
-	ti.Prompt = "✎ "
-	// Default the confirm to Yes since the user reaches it by submitting a
-	// message. confirmVal is a stable heap pointer shared across pane copies.
+// NewPane builds the Git tab. It makes no git calls; the first RefreshMsg loads the status.
+func NewPane(opts Options) Pane {
+	box := textarea.New()
+	box.ShowLineNumbers = false
+	box.SetHeight(4)
+	box.Placeholder = "subject\n\nbody"
+	if opts.CommitAI {
+		box.Placeholder = "subject (ctrl+g for AI)\n\nbody"
+	}
 	confirmVal := new(bool)
 	*confirmVal = true
 	cf := huh.NewConfirm().
@@ -100,415 +129,565 @@ func NewPane(theme string) Pane {
 		Negative("No").
 		Inline(true).
 		Value(confirmVal)
-	bl := list.New(nil, branchDelegate{}, 0, 0)
-	bl.SetShowTitle(false)
-	bl.SetShowStatusBar(false)
-	bl.SetShowHelp(false)
-	bl.KeyMap.Quit = key.Binding{} // deck's global "q" owns quit
-	p := Pane{diff: viewport.New(0, 0), commitBox: ti, theme: theme,
-		confirm: cf, confirmVal: confirmVal, branchList: bl}
-	p.reload()
-	return p
+	name := textinput.New()
+	name.Prompt = "new branch: "
+	name.Placeholder = "name"
+	return Pane{
+		opts:       opts,
+		diff:       viewport.New(0, 0),
+		cache:      map[diffKey]cachedDiff{},
+		box:        box,
+		confirm:    cf,
+		confirmVal: confirmVal,
+		cancelGen:  new(context.CancelFunc),
+		branchList: newBranchList(),
+		nameInput:  name,
+		logList:    newLogList(),
+		spin:       spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(ui.Active)),
+	}
 }
 
-// SetSize lays out the change list and diff viewport.
+// SetSize sets the pane's outer box: the list column plus the bordered right column.
 func (p *Pane) SetSize(w, h int) {
 	p.width, p.height = w, h
-	listW := w / 3
-	if listW < 24 {
-		listW = 24
-	}
-	p.diff.Width = w - listW - 4
-	p.diff.Height = h - 3
-	p.commitBox.Width = w - 6
-	p.branchList.SetSize(w-listW-4, h-4)
+	innerW, innerH := p.rightInner()
+	p.diff.Width = innerW
+	p.diff.Height = innerH
+	p.box.SetWidth(max(innerW, 1))
+	p.nameInput.Width = max(innerW-len(p.nameInput.Prompt)-1, 1)
+	p.branchList.SetSize(innerW, max(innerH-2, 0))
+	p.logList.SetSize(max(p.listWidth()-1, 0), max(h-p.listTop(), 0))
+	p.offset = p.scrollOffset()
 }
 
-func (p *Pane) reload() {
-	if !IsRepo() {
-		p.err = nil
-		p.changes = nil
-		p.status = "not a git repository"
-		return
-	}
-	changes, err := Status()
-	p.err = err
-	p.changes = changes
-	if p.cursor >= len(changes) {
-		p.cursor = max(0, len(changes)-1)
-	}
-	if b, err := CurrentBranch(); err == nil {
-		p.branch = b
-	}
-	p.refreshDiff()
+func (p Pane) listWidth() int { return max(p.width*2/5, 24) }
+
+func (p Pane) rightInner() (int, int) {
+	return max(p.width-p.listWidth()-4, 0), max(p.height-2, 0)
 }
 
-func (p *Pane) refreshDiff() {
-	if p.showLog {
-		p.refreshLog()
-		return
-	}
-	c, ok := p.selected()
-	if !ok {
-		p.diff.SetContent("")
-		return
-	}
-	var (
-		out string
-		err error
-	)
-	if c.IsStaged() {
-		out, err = run("diff", "--staged", "--", c.Path)
-	} else {
-		out, err = Diff(c.Path)
-	}
-	if err != nil {
-		p.diff.SetContent(ui.Err.Render(err.Error()))
-		return
-	}
-	if strings.TrimSpace(out) == "" {
-		out = "(no textual diff — new, binary, or empty)"
-	}
-	p.diff.SetContent(p.highlightDiff(out))
-	p.diff.GotoTop()
-}
+func (p Pane) listTop() int { return 2 }
 
-// refreshLog fills the right viewport with the decorated commit log.
-func (p *Pane) refreshLog() {
-	out, err := Log(50)
-	if err != nil {
-		p.diff.SetContent(ui.Err.Render(strings.TrimSpace(out)))
-		return
-	}
-	p.diff.SetContent(styleLog(out))
-	p.diff.GotoTop()
-}
+func (p Pane) visibleRows() int { return max(p.height-p.listTop(), 1) }
 
-// styleLog colours each `git log --oneline --decorate` line: the leading hash
-// in accent, any "(branch, tag)" decoration in green.
-func styleLog(out string) string {
-	hash := lipgloss.NewStyle().Foreground(ui.ColorAccent)
-	deco := lipgloss.NewStyle().Foreground(ui.ColorString)
-	var b strings.Builder
-	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
-		h, rest, ok := strings.Cut(line, " ")
-		if !ok {
-			b.WriteString(line + "\n")
-			continue
+func (p Pane) rowOf(item int) int {
+	for i, r := range p.rows {
+		if !r.header && r.item == item {
+			return i
 		}
-		if strings.HasPrefix(rest, "(") {
-			if end := strings.Index(rest, ")"); end != -1 {
-				rest = deco.Render(rest[:end+1]) + rest[end+1:]
-			}
-		}
-		b.WriteString(hash.Render(h) + " " + rest + "\n")
 	}
-	return b.String()
+	return 0
 }
 
-func (p *Pane) selected() (Change, bool) {
-	if p.cursor < 0 || p.cursor >= len(p.changes) {
-		return Change{}, false
+func (p Pane) scrollOffset() int {
+	vis, off := p.visibleRows(), p.offset
+	target := p.rowOf(p.cursor)
+	top := target
+	if top > 0 && p.rows[top-1].header {
+		top--
 	}
-	return p.changes[p.cursor], true
+	if top < off {
+		off = top
+	}
+	if target >= off+vis {
+		off = target - vis + 1
+	}
+	return max(min(off, len(p.rows)-vis), 0)
 }
 
-// Update handles staging, committing, branch switching, and diff scrolling.
+func (p Pane) selected() (Item, bool) {
+	if p.cursor < 0 || p.cursor >= len(p.items) {
+		return Item{}, false
+	}
+	return p.items[p.cursor], true
+}
+
+func (p Pane) spinning() bool { return p.loading || p.busy != "" || p.generating }
+
+func (p *Pane) setStatus(text string, isErr bool) { p.status, p.statusErr = text, isErr }
+
+func (p Pane) withSpin(spinningBefore bool, cmd tea.Cmd) tea.Cmd {
+	if spinningBefore || !p.spinning() {
+		return cmd
+	}
+	return tea.Batch(cmd, p.spin.Tick)
+}
+
+// Update handles status and diff loads, the change list, the diff, the commit
+// box, the branch picker, the log and remote operations.
 func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
+	p, cmd := p.update(msg)
+	p.offset = p.scrollOffset()
+	return p, cmd
+}
+
+func (p Pane) update(msg tea.Msg) (Pane, tea.Cmd) {
 	switch msg := msg.(type) {
-	case refreshMsg:
-		p.reload()
+	case RefreshMsg:
+		return p.reload()
+	case StatusLoadedMsg:
+		return p.applyStatus(msg)
+	case diffDueMsg:
+		if msg.seq != p.diffSeq || p.mode != modeChanges {
+			return p, nil
+		}
+		return p.fetchDiff()
+	case DiffLoadedMsg:
+		return p.diffLoaded(msg), nil
+	case opDoneMsg:
+		return p.opDone(msg)
+	case commitDoneMsg:
+		return p.commitDone(msg)
+	case headMessageMsg:
+		if msg.err == nil && p.committing && p.amend && strings.TrimSpace(p.box.Value()) == "" {
+			p.box.SetValue(strings.TrimSpace(msg.text))
+		}
 		return p, nil
+	case branchesLoadedMsg:
+		return p.applyBranches(msg), nil
+	case logLoadedMsg:
+		return p.applyLog(msg), nil
+	case showLoadedMsg:
+		return p.showLoaded(msg), nil
 	case CommitMsgReady:
-		p.commitBox.SetValue(strings.TrimSpace(msg.Text))
-		return p, nil
+		return p.commitMsgReady(msg)
+	case spinner.TickMsg:
+		if !p.spinning() {
+			return p, nil
+		}
+		var cmd tea.Cmd
+		p.spin, cmd = p.spin.Update(msg)
+		return p, cmd
+	case tea.MouseMsg:
+		return p.mouse(msg)
 	case tea.KeyMsg:
-		if p.committing {
-			return p.updateCommitting(msg)
-		}
-		if p.branching {
-			return p.updateBranching(msg)
-		}
-		switch msg.String() {
-		case "up", "k":
-			if p.cursor > 0 {
-				p.cursor--
-				p.refreshDiff()
-			}
-		case "down", "j":
-			if p.cursor < len(p.changes)-1 {
-				p.cursor++
-				p.refreshDiff()
-			}
-		case " ", "s":
-			p.toggleStage()
-		case "c":
-			if hasStaged(p.changes) {
-				p.committing = true
-				p.commitBox.Focus()
-				return p, textinput.Blink
-			}
-			p.status = "nothing staged to commit"
-		case "b":
-			return p.openBranches(), nil
-		case "l":
-			p.showLog = !p.showLog
-			p.refreshDiff()
-		case "esc":
-			if p.showLog {
-				p.showLog = false
-				p.refreshDiff()
-			}
-		case "r":
-			p.reload()
-		}
+		return p.key(msg)
 	}
 	var cmd tea.Cmd
-	p.diff, cmd = p.diff.Update(msg)
+	switch {
+	case p.committing && !p.confirming:
+		p.box, cmd = p.box.Update(msg)
+	case p.naming:
+		p.nameInput, cmd = p.nameInput.Update(msg)
+	}
 	return p, cmd
 }
 
-// openBranches loads the branch list and shows the picker in the right column.
-func (p Pane) openBranches() Pane {
-	branches, err := Branches()
-	if err != nil {
-		p.status = "branches: " + err.Error()
-		return p
-	}
-	items := make([]list.Item, len(branches))
-	for i, b := range branches {
-		items[i] = branchItem(b)
-	}
-	p.branchList.SetDelegate(branchDelegate{current: p.branch})
-	p.branchList.ResetFilter()
-	p.branchList.SetItems(items)
-	p.branchList.Select(0)
-	p.branching = true
-	return p
+func (p Pane) reload() (Pane, tea.Cmd) {
+	was := p.spinning()
+	p.reloads++
+	p.statusSeq++
+	p.loading = true
+	return p, p.withSpin(was, loadStatus(p.statusSeq, p.repo, p.opts.Dir))
 }
 
-// updateBranching drives the branch picker: enter checks out, esc closes (or
-// cancels the filter first), everything else moves/filters the list.
-func (p Pane) updateBranching(msg tea.KeyMsg) (Pane, tea.Cmd) {
-	filtering := p.branchList.FilterState() == list.Filtering
-	if !filtering {
-		switch msg.String() {
-		case "esc":
-			p.branching = false
-			return p, nil
-		case "enter":
-			b, ok := p.branchList.SelectedItem().(branchItem)
-			p.branching = false
-			if !ok {
-				return p, nil
+func loadStatus(seq int, repo *Repo, dir string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if repo == nil {
+			r, err := OpenRepo(ctx, dir)
+			if err != nil {
+				return StatusLoadedMsg{Seq: seq, Err: err}
 			}
-			if out, err := Checkout(string(b)); err != nil {
-				p.status = "checkout failed: " + strings.TrimSpace(out)
-			} else {
-				p.status = "switched to " + string(b)
-			}
-			p.reload()
-			return p, nil
+			repo = r
 		}
+		snap, err := repo.StatusSnapshot(ctx, false)
+		if err != nil {
+			return StatusLoadedMsg{Seq: seq, Repo: repo, Err: err}
+		}
+		return StatusLoadedMsg{Seq: seq, Repo: repo, Snapshot: snap,
+			IndexStamp: repo.IndexStamp(), Stamps: fileStamps(repo, snap.Entries)}
 	}
-	var cmd tea.Cmd
-	p.branchList, cmd = p.branchList.Update(msg)
-	return p, cmd
 }
 
-func (p Pane) updateCommitting(msg tea.KeyMsg) (Pane, tea.Cmd) {
-	if p.confirming {
-		return p.updateConfirming(msg)
-	}
-	switch msg.String() {
-	case "esc":
-		return p.cancelCommit(), nil
-	case "ctrl+g":
-		return p, func() tea.Msg { return GenCommitMsgRequest{} }
-	case "enter":
-		text := strings.TrimSpace(p.commitBox.Value())
-		if text == "" {
-			p.status = "empty commit message"
-			return p, nil
-		}
-		// Move to the confirm step rather than committing immediately.
-		p.commitText = text
-		p.confirming = true
-		*p.confirmVal = true
-		p.commitBox.Blur()
-		p.confirm.Focus()
+func (p Pane) applyStatus(msg StatusLoadedMsg) (Pane, tea.Cmd) {
+	if msg.Seq != p.statusSeq {
 		return p, nil
 	}
-	var cmd tea.Cmd
-	p.commitBox, cmd = p.commitBox.Update(msg)
-	return p, cmd
+	p.loading = false
+	if errors.Is(msg.Err, ErrNotRepo) {
+		p.notRepo, p.repo, p.snap, p.items, p.rows = true, nil, Snapshot{}, nil, nil
+		p.cursor = 0
+		p.setDiff(diffKey{}, cachedDiff{})
+		return p, nil
+	}
+	if msg.Err != nil {
+		p.setStatus("status: "+msg.Err.Error(), true)
+		return p, nil
+	}
+	prev, had := p.selected()
+	pos := p.posInSection()
+	p.notRepo = false
+	p.repo = msg.Repo
+	p.snap = msg.Snapshot
+	p.indexStamp = msg.IndexStamp
+	p.stamps = msg.Stamps
+	p.items = Items(msg.Snapshot.Entries)
+	p.rows = layoutRows(p.items)
+	p.cursor = p.reselect(prev, had, pos)
+	if p.mode != modeChanges {
+		return p, nil
+	}
+	return p.requestDiff()
 }
 
-// updateConfirming drives the huh.Confirm step. y / enter-on-Yes commit; n /
-// enter-on-No return to the edit box; esc cancels the whole flow. Other keys
-// (left/right) toggle the confirm's highlighted button.
-func (p Pane) updateConfirming(msg tea.KeyMsg) (Pane, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		return p.cancelCommit(), nil
-	case "y":
-		return p.doCommit()
-	case "n":
-		return p.backToEdit(), nil
-	case "enter":
-		if v, ok := p.confirm.GetValue().(bool); ok && v {
-			return p.doCommit()
+func (p Pane) posInSection() int {
+	it, ok := p.selected()
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, other := range p.items[:p.cursor] {
+		if other.Section == it.Section {
+			n++
 		}
-		return p.backToEdit(), nil
 	}
-	model, cmd := p.confirm.Update(msg)
-	p.confirm = model.(*huh.Confirm)
-	return p, cmd
+	return n
 }
 
-// doCommit runs the commit for the pending message and resets the flow.
-func (p Pane) doCommit() (Pane, tea.Cmd) {
-	text := p.commitText
-	out, err := Commit(text)
-	p = p.cancelCommit()
-	if err != nil {
-		p.status = "commit failed: " + strings.TrimSpace(out)
-	} else {
-		p.status = "committed: " + text
+// reselect keeps the cursor on the same entry, or on its neighbour in the same
+// section when the entry moved (staging walks down the Unstaged list).
+func (p Pane) reselect(prev Item, had bool, pos int) int {
+	if !had {
+		return 0
 	}
-	p.reload()
+	var same []int
+	for i, it := range p.items {
+		if it.Section == prev.Section {
+			if it.Entry.Path == prev.Entry.Path {
+				return i
+			}
+			same = append(same, i)
+		}
+	}
+	if len(same) > 0 {
+		return same[min(pos, len(same)-1)]
+	}
+	for i, it := range p.items {
+		if it.Entry.Path == prev.Entry.Path {
+			return i
+		}
+	}
+	return max(min(p.cursor, len(p.items)-1), 0)
+}
+
+func (p Pane) move(delta int) (Pane, tea.Cmd) {
+	return p.moveTo(p.cursor + delta)
+}
+
+func (p Pane) moveTo(i int) (Pane, tea.Cmd) {
+	i = max(min(i, len(p.items)-1), 0)
+	if i == p.cursor || len(p.items) == 0 {
+		return p, nil
+	}
+	p.cursor = i
+	return p.scheduleDiff()
+}
+
+func (p Pane) key(msg tea.KeyMsg) (Pane, tea.Cmd) {
+	switch {
+	case p.pending != nil:
+		return p.pendingKey(msg)
+	case p.committing:
+		return p.commitKey(msg)
+	case p.branching:
+		return p.branchKey(msg)
+	case p.focus == focusDiff:
+		return p.diffKeys(msg)
+	case p.mode == modeLog:
+		return p.logKey(msg)
+	}
+	return p.listKey(msg)
+}
+
+func (p Pane) listKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		return p.move(1)
+	case "k", "up":
+		return p.move(-1)
+	case "g", "home":
+		return p.moveTo(0)
+	case "G", "end":
+		return p.moveTo(len(p.items) - 1)
+	case "enter", "right":
+		if _, ok := p.selected(); ok {
+			p.focus = focusDiff
+		}
+	case " ", "s":
+		return p.toggleStage()
+	case "a":
+		return p.localOp("stage all", true, func(ctx context.Context, r *Repo) error { return r.StageAll(ctx) })
+	case "A":
+		initial := p.snap.Initial
+		return p.localOp("unstage all", true, func(ctx context.Context, r *Repo) error { return r.UnstageAll(ctx, initial) })
+	case "X":
+		return p.askDiscard(), nil
+	case "c":
+		return p.openCommit()
+	case "b":
+		return p.openBranches()
+	case "f":
+		return p.startBusy("fetch", "fetching…", func(ctx context.Context, r *Repo) error { return r.Fetch(ctx) })
+	case "p":
+		return p.startBusy("pull", "pulling…", func(ctx context.Context, r *Repo) error { return r.Pull(ctx) })
+	case "P":
+		branch, upstream := p.snap.Branch, p.snap.Upstream
+		return p.startBusy("push", "pushing…", func(ctx context.Context, r *Repo) error { return r.Push(ctx, branch, upstream) })
+	case "l":
+		return p.openLog()
+	case "e":
+		return p.edit()
+	case "r":
+		return p.reload()
+	}
 	return p, nil
 }
 
-// backToEdit returns from the confirm step to the (still-populated) edit box.
-func (p Pane) backToEdit() Pane {
-	p.confirming = false
-	p.confirm.Blur()
-	p.commitBox.Focus()
-	return p
-}
-
-// cancelCommit tears down the entire commit flow.
-func (p Pane) cancelCommit() Pane {
-	p.committing = false
-	p.confirming = false
-	p.commitText = ""
-	p.commitBox.Reset()
-	p.commitBox.Blur()
-	p.confirm.Blur()
-	return p
-}
-
-func (p *Pane) toggleStage() {
-	c, ok := p.selected()
-	if !ok {
-		return
-	}
-	var err error
-	if c.IsStaged() {
-		err = Unstage(c.Path)
-	} else {
-		err = Stage(c.Path)
-	}
-	if err != nil {
-		p.status = err.Error()
-	}
-	p.reload()
-}
-
-// View renders the change list, diff, and (when active) the commit box.
-func (p Pane) View() string {
-	listW := p.width / 3
-	if listW < 24 {
-		listW = 24
-	}
-	var b strings.Builder
-	b.WriteString(ui.Active.Render("⎇ "+p.branch) + "\n\n")
-	if p.err != nil {
-		b.WriteString(ui.Err.Render(p.err.Error()) + "\n")
-	}
-	if len(p.changes) == 0 {
-		b.WriteString(ui.Muted.Render("working tree clean"))
-	}
-	for i, c := range p.changes {
-		mark := c.Staged + c.Unstaged
-		line := mark + " " + c.Path
-		switch {
-		case i == p.cursor:
-			b.WriteString(ui.Active.Render("› " + line))
-		case c.IsStaged():
-			b.WriteString("  " + lipgloss.NewStyle().Foreground(ui.ColorString).Render(line))
-		default:
-			b.WriteString("  " + line)
+func (p Pane) diffKeys(msg tea.KeyMsg) (Pane, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		p.diff.ScrollDown(1)
+	case "k", "up":
+		p.diff.ScrollUp(1)
+	case "ctrl+d":
+		p.diff.HalfPageDown()
+	case "ctrl+u":
+		p.diff.HalfPageUp()
+	case "pgdown", " ", "f":
+		p.diff.PageDown()
+	case "pgup", "b":
+		p.diff.PageUp()
+	case "g", "home":
+		p.diff.GotoTop()
+	case "G", "end":
+		p.diff.GotoBottom()
+	case "esc", "h", "left":
+		p.focus = focusList
+	case "e":
+		if p.mode == modeChanges {
+			return p.edit()
 		}
-		b.WriteString("\n")
 	}
-	if p.status != "" {
-		b.WriteString("\n" + ui.Muted.Render(p.status))
-	}
-	left := lipgloss.NewStyle().Width(listW).Height(p.height).Render(b.String())
-	right := p.diff.View()
-	switch {
-	case p.branching:
-		right = ui.Active.Render("switch branch") +
-			ui.Muted.Render("  (enter switch · / filter · esc cancel)") +
-			"\n\n" + p.branchList.View()
-	case p.confirming:
-		right = p.commitBox.View() + "\n" + p.confirm.View() + "\n" + p.diff.View()
-	case p.committing:
-		right = p.commitBox.View() + "\n" + p.diff.View()
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, ui.Pane.Render(right))
+	return p, nil
 }
 
-// Capturing reports whether a modal flow owns the keyboard: the commit edit
-// box, the commit confirm step, or the branch picker.
-func (p Pane) Capturing() bool { return p.committing || p.confirming || p.branching }
+func (p Pane) pendingKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		run := p.pending.run
+		p.pending = nil
+		return run(p)
+	case "n", "N", "esc":
+		p.pending = nil
+	}
+	return p, nil
+}
 
-// Branch reports the checked-out branch for the status bar.
-func (p Pane) Branch() string { return p.branch }
+func (p Pane) toggleStage() (Pane, tea.Cmd) {
+	it, ok := p.selected()
+	if !ok {
+		return p, nil
+	}
+	if it.Section == SectionStaged {
+		initial := p.snap.Initial
+		return p.localOp("unstage", true, func(ctx context.Context, r *Repo) error { return r.Unstage(ctx, initial, it.Entry) })
+	}
+	return p.localOp("stage", true, func(ctx context.Context, r *Repo) error { return r.Stage(ctx, it.Entry.Path) })
+}
+
+func (p Pane) askDiscard() Pane {
+	it, ok := p.selected()
+	if !ok {
+		return p
+	}
+	if it.Section == SectionConflicts {
+		p.setStatus("resolve conflicts before discarding", true)
+		return p
+	}
+	initial := p.snap.Initial
+	p.pending = &confirmPrompt{
+		text: "discard " + it.Section.String() + " changes to " + it.Entry.Path + "? y/n",
+		run: func(p Pane) (Pane, tea.Cmd) {
+			return p.localOp("discard "+it.Entry.Path, false, func(ctx context.Context, r *Repo) error {
+				return r.Discard(ctx, initial, it)
+			})
+		},
+	}
+	return p
+}
+
+func (p Pane) edit() (Pane, tea.Cmd) {
+	it, ok := p.selected()
+	if !ok || p.repo == nil {
+		return p, nil
+	}
+	if it.Entry.Deleted() && it.Section != SectionStaged {
+		p.setStatus(it.Entry.Path+" is deleted", true)
+		return p, nil
+	}
+	line := 1
+	if p.shownKey == p.keyFor(it) {
+		line = firstHunkLine(p.rawDiff)
+	}
+	msg := editor.OpenMsg{Target: editor.Target{Path: p.repo.Abs(it.Entry.Path), Line: line}}
+	return p, func() tea.Msg { return msg }
+}
+
+func (p Pane) localOp(label string, quiet bool, fn func(context.Context, *Repo) error) (Pane, tea.Cmd) {
+	if p.repo == nil {
+		p.setStatus("not a git repository", true)
+		return p, nil
+	}
+	repo := p.repo
+	return p, func() tea.Msg { return opDoneMsg{label: label, quiet: quiet, err: fn(context.Background(), repo)} }
+}
+
+func (p Pane) startBusy(label, text string, fn func(context.Context, *Repo) error) (Pane, tea.Cmd) {
+	if p.repo == nil {
+		p.setStatus("not a git repository", true)
+		return p, nil
+	}
+	if p.busy != "" {
+		return p, nil
+	}
+	was := p.spinning()
+	p.busy, p.busyOp = text, label
+	repo := p.repo
+	cmd := func() tea.Msg { return opDoneMsg{label: label, err: fn(context.Background(), repo)} }
+	return p, p.withSpin(was, cmd)
+}
+
+func (p Pane) opDone(msg opDoneMsg) (Pane, tea.Cmd) {
+	if msg.label == p.busyOp {
+		p.busy, p.busyOp = "", ""
+	}
+	var toast tea.Cmd
+	switch {
+	case msg.err != nil:
+		p.setStatus(msg.label+": "+msg.err.Error(), true)
+		toast = ui.Toast(ui.LevelError, p.status)
+	case !msg.quiet:
+		p.setStatus(msg.label+" ✓", false)
+	}
+	p, cmd := p.reload()
+	return p, tea.Batch(cmd, toast)
+}
+
+func (p Pane) mouse(msg tea.MouseMsg) (Pane, tea.Cmd) {
+	if p.committing || p.branching || p.pending != nil {
+		return p, nil
+	}
+	inList := msg.X < p.listWidth()
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := 1
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -1
+		}
+		switch {
+		case !inList && delta > 0:
+			p.diff.ScrollDown(wheelStep)
+		case !inList:
+			p.diff.ScrollUp(wheelStep)
+		case p.mode == modeLog:
+			p.logStep(delta)
+		default:
+			return p.move(delta)
+		}
+		return p, nil
+	case tea.MouseButtonLeft:
+		if msg.Action != tea.MouseActionPress {
+			return p, nil
+		}
+		if !inList {
+			p.focus = focusDiff
+			return p, nil
+		}
+		p.focus = focusList
+		if p.mode == modeLog {
+			return p, nil
+		}
+		r := p.offset + msg.Y - p.listTop()
+		if r >= 0 && r < len(p.rows) && !p.rows[r].header {
+			return p.moveTo(p.rows[r].item)
+		}
+	}
+	return p, nil
+}
+
+// Capturing reports whether a modal flow owns the keyboard: the commit box,
+// the branch picker or a y/n prompt.
+func (p Pane) Capturing() bool { return p.committing || p.branching || p.pending != nil }
+
+// Branch reports the checked-out branch with ahead/behind counts for the status bar.
+func (p Pane) Branch() string {
+	if p.snap.Branch == "" || p.snap.Upstream == "" {
+		return p.snap.Branch
+	}
+	return fmt.Sprintf("%s ↑%d ↓%d", p.snap.Branch, p.snap.Ahead, p.snap.Behind)
+}
+
+// Top is the repository root once the first status load has resolved it.
+func (p Pane) Top() string {
+	if p.repo == nil {
+		return ""
+	}
+	return p.repo.Top
+}
+
+// Reloads counts status reloads so callers can observe that a refresh landed.
+func (p Pane) Reloads() int { return p.reloads }
 
 // DirtyCount reports the number of changed paths for the status bar.
-func (p Pane) DirtyCount() int { return len(p.changes) }
+func (p Pane) DirtyCount() int { return len(p.snap.Entries) }
 
-// HelpBindings returns the Git-pane key hints shown in the help footer.
+var (
+	bindMove     = key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "move"))
+	bindDiff     = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "diff"))
+	bindStage    = key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "stage/unstage"))
+	bindAll      = key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("a/A", "stage/unstage all"))
+	bindDiscard  = key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "discard"))
+	bindCommit   = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "commit"))
+	bindBranches = key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "branches"))
+	bindRemote   = key.NewBinding(key.WithKeys("f", "p", "P"), key.WithHelp("f/p/P", "fetch/pull/push"))
+	bindLog      = key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log"))
+	bindEdit     = key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit"))
+	bindRefresh  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh"))
+	bindScroll   = key.NewBinding(key.WithKeys("j", "k", "ctrl+d", "ctrl+u"), key.WithHelp("j/k ctrl+d/u", "scroll"))
+	bindEnds     = key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/bottom"))
+	bindBack     = key.NewBinding(key.WithKeys("esc", "h"), key.WithHelp("esc", "back"))
+	bindShow     = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "show commit"))
+	bindYes      = key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "confirm"))
+	bindNo       = key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", "cancel"))
+	bindSave     = key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "commit"))
+	bindAmend    = key.NewBinding(key.WithKeys("alt+a"), key.WithHelp(ui.Alt("a"), "amend"))
+	bindAI       = key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "AI msg"))
+	bindCancel   = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel"))
+	bindSwitch   = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "switch"))
+	bindNew      = key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new"))
+	bindDelete   = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete"))
+	bindFilter   = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
+)
+
+// HelpBindings returns the key hints for the pane's current state.
 func (p Pane) HelpBindings() []key.Binding {
-	return []key.Binding{
-		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
-		key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "stage")),
-		key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "commit")),
-		key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "branches")),
-		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
-		key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "AI msg")),
-		key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-	}
-}
-
-func hasStaged(changes []Change) bool {
-	for _, c := range changes {
-		if c.IsStaged() {
-			return true
+	switch {
+	case p.pending != nil:
+		return []key.Binding{bindYes, bindNo}
+	case p.committing:
+		b := []key.Binding{bindSave, bindAmend}
+		if p.opts.CommitAI {
+			b = append(b, bindAI)
 		}
+		return append(b, bindCancel)
+	case p.branching:
+		return []key.Binding{bindSwitch, bindNew, bindDelete, bindFilter, bindCancel}
+	case p.focus == focusDiff:
+		return []key.Binding{bindScroll, bindEnds, bindEdit, bindBack}
+	case p.mode == modeLog:
+		return []key.Binding{bindMove, bindShow, bindBack}
 	}
-	return false
-}
-
-func (p Pane) highlightDiff(diff string) string {
-	lexer := lexers.Get("diff")
-	if lexer == nil {
-		return diff
-	}
-	it, err := lexer.Tokenise(nil, diff)
-	if err != nil {
-		return diff
-	}
-	style := styles.Get(p.theme)
-	if style == nil {
-		style = styles.Fallback
-	}
-	var buf strings.Builder
-	if err := formatters.Get("terminal256").Format(&buf, style, it); err != nil {
-		return diff
-	}
-	return buf.String()
+	return []key.Binding{bindMove, bindDiff, bindStage, bindAll, bindDiscard, bindCommit,
+		bindBranches, bindRemote, bindLog, bindEdit, bindRefresh}
 }

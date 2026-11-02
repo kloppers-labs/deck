@@ -1,8 +1,5 @@
-// Package httpc is deck's "HTTP" tab: a minimal REST client. The user edits a
-// method, URL, headers, and body, fires the request via net/http, and sees the
-// status, latency, and a syntax-highlighted response body. This file holds the
-// pure, side-effect-free helpers (request building, header parsing, response
-// highlighting) so they can be unit-tested without a Bubble Tea program.
+// Package httpc is deck's "HTTP" tab: a REST client with normal and insert
+// modes, a scrollable response with headers, and requests from .http files.
 package httpc
 
 import (
@@ -11,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
@@ -48,42 +47,79 @@ func parseHeaders(text string) (http.Header, error) {
 	return h, nil
 }
 
-// buildRequest assembles an *http.Request from the pane's fields. A URL without
-// a scheme is assumed https so the user can type "api.example.com/x".
-func buildRequest(method, rawURL, headersText, body string) (*http.Request, error) {
+// buildRequest defaults the scheme to http:// for loopback hosts (https://
+// otherwise) and adds a JSON Content-Type when missing, listing it in auto.
+func buildRequest(method, rawURL, headersText, body string) (req *http.Request, auto []string, err error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
-		return nil, errors.New("URL is empty")
+		return nil, nil, errors.New("URL is empty")
 	}
 	if !strings.Contains(rawURL, "://") {
-		rawURL = "https://" + rawURL
+		scheme := "https://"
+		if isLoopback(rawURL) {
+			scheme = "http://"
+		}
+		rawURL = scheme + rawURL
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("missing host in %q", rawURL)
+		return nil, nil, fmt.Errorf("missing host in %q", rawURL)
 	}
-
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
 	}
-	req, err := http.NewRequest(method, u.String(), rdr)
+	req, err = http.NewRequest(method, u.String(), rdr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	hdrs, err := parseHeaders(headersText)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for k, vs := range hdrs {
 		for _, v := range vs {
 			req.Header.Add(k, v)
 		}
 	}
-	return req, nil
+	trimmed := strings.TrimSpace(body)
+	if req.Header.Get("Content-Type") == "" && trimmed != "" && json.Valid([]byte(trimmed)) {
+		req.Header.Set("Content-Type", "application/json")
+		auto = append(auto, "Content-Type: application/json")
+	}
+	return req, auto, nil
+}
+
+// isLoopback reports whether a scheme-less URL's host is localhost, 127.0.0.1
+// or ::1.
+func isLoopback(raw string) bool {
+	host, _, _ := strings.Cut(raw, "/")
+	if strings.HasPrefix(host, "[") {
+		if end := strings.Index(host, "]"); end > 0 {
+			host = host[1:end]
+		}
+	} else if h, _, ok := strings.Cut(host, ":"); ok {
+		host = h
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+// formatHeaders renders response headers sorted by name, one value per line.
+func formatHeaders(h http.Header) string {
+	var lines []string
+	for _, k := range slices.Sorted(maps.Keys(h)) {
+		for _, v := range h[k] {
+			lines = append(lines, ui.Active.Render(k)+": "+v)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // prettyJSON indents JSON for readability, returning the input unchanged if it
