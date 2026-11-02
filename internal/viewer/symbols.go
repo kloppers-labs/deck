@@ -48,7 +48,9 @@ func Breadcrumb(syms []Symbol, p Pos) []string {
 	}
 	var out []string
 	for i := best; i >= 0; {
-		out = append(out, syms[i].Name)
+		if syms[i].Kind != SymbolFile {
+			out = append(out, syms[i].Name)
+		}
 		next := syms[i].Parent
 		if next >= i {
 			break

@@ -642,3 +642,17 @@ func TestOpenURIShowsVirtualDocument(t *testing.T) {
 		t.Error("e on a virtual document should not launch the editor")
 	}
 }
+
+func TestBreadcrumbSkipsFileSymbol(t *testing.T) {
+	syms := []Symbol{
+		{Name: "$metadata$/assemblies/Microsoft.AspNetCore/symbols/WebApplication.cs", Kind: SymbolFile, Range: Range{Pos{0, 0}, Pos{40, 0}}, Parent: -1},
+		{Name: "Builder", Kind: SymbolNamespace, Range: Range{Pos{1, 0}, Pos{39, 1}}, Depth: 1, Parent: 0},
+		{Name: "WebApplication", Kind: SymbolClass, Range: Range{Pos{3, 0}, Pos{38, 1}}, Depth: 2, Parent: 1},
+	}
+	if got := strings.Join(Breadcrumb(syms, Pos{5, 2}), " › "); got != "Builder › WebApplication" {
+		t.Errorf("Breadcrumb = %q, want the file-level symbol left out", got)
+	}
+	if got := Breadcrumb(syms[:1], Pos{5, 2}); len(got) != 0 {
+		t.Errorf("Breadcrumb inside only the file symbol = %q, want empty", got)
+	}
+}

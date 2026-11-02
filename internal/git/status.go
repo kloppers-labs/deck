@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// Entry is one porcelain v2 record. Kind is '1' (ordinary), '2' (rename or
-// copy), 'u' (unmerged), '?' (untracked) or '!' (ignored); X and Y are the
-// index and work-tree codes, '.' meaning unchanged. Paths are root-relative.
+// Entry is one porcelain v2 record with root-relative paths; Kind is the
+// record type ('1', '2', 'u', '?', '!') and X/Y the index/work-tree codes.
 type Entry struct {
 	Kind byte
 	X, Y byte

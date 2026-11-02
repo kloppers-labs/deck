@@ -198,3 +198,15 @@ func TestInitDetectsTasks(t *testing.T) {
 		t.Error("Init should start task detection")
 	}
 }
+
+func TestMouseIgnoredWhileQuitPromptOpen(t *testing.T) {
+	m := withRunningTask(t, sleepMarker())
+	m = update(t, m, keyMsg("q"))
+	if !m.quit.asking {
+		t.Fatal("the quit confirmation should be open")
+	}
+	gitX := m.tabWidths()[0] + 1
+	if got := update(t, m, press(gitX, 1)); got.active != tabFiles || !got.quit.asking {
+		t.Error("a click behind the quit prompt should neither switch tabs nor dismiss it")
+	}
+}

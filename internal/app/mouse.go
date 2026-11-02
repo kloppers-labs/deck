@@ -5,7 +5,7 @@ import (
 )
 
 func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.duplicateMotion(msg) {
+	if m.duplicateMotion(msg) || m.quit.asking || m.quit.stopping {
 		return m, nil
 	}
 	if m.help.open {
