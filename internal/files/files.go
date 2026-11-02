@@ -1,6 +1,6 @@
 // Package files is deck's file navigator: a directory listing on the left and a
 // syntax-highlighted preview on the right. Selecting a file emits an OpenMsg so
-// the root model can hand off to micro; pressing "a" emits a SendToAIMsg.
+// the root model can hand off to micro.
 package files
 
 import (
@@ -22,12 +22,6 @@ import (
 
 // OpenMsg asks the root model to open Path in the editor.
 type OpenMsg struct{ Path string }
-
-// SendToAIMsg asks the root model to send Path's contents to the AI pane.
-type SendToAIMsg struct{ Path string }
-
-// SendTestsMsg asks the root model to have the AI generate tests for Path.
-type SendTestsMsg struct{ Path string }
 
 // entry is one row in the listing; it doubles as the list.Item, filtering on
 // the file name.
@@ -235,9 +229,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// listKey handles the deck-specific list keys (activate, up-a-dir, send-to-AI,
-// generate-tests), reporting whether it consumed the key. Plain movement and
-// filtering are left to the embedded list.
+// listKey handles the deck-specific list keys (activate, up-a-dir), reporting
+// whether it consumed the key; movement and filtering are left to the list.
 func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "enter", "l", "right":
@@ -246,18 +239,6 @@ func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case "backspace", "h", "left", "-":
 		m.dir = filepath.Dir(m.dir)
 		m.load()
-		return m, nil, true
-	case "a":
-		if e, ok := m.selected(); ok && !e.isDir {
-			path := filepath.Join(m.dir, e.name)
-			return m, func() tea.Msg { return SendToAIMsg{Path: path} }, true
-		}
-		return m, nil, true
-	case "t":
-		if e, ok := m.selected(); ok && !e.isDir {
-			path := filepath.Join(m.dir, e.name)
-			return m, func() tea.Msg { return SendTestsMsg{Path: path} }, true
-		}
 		return m, nil, true
 	}
 	return m, nil, false
@@ -275,8 +256,6 @@ func (m Model) HelpBindings() []key.Binding {
 		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "up dir")),
-		key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "explain")),
-		key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tests")),
 		key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "focus preview")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list")),

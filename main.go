@@ -1,6 +1,5 @@
-// Command deck is a terminal command center: browse files, drive git, and ask
-// AI — handing off to micro for editing. It reuses the user's authenticated
-// claude/codex/mods CLIs rather than calling any API directly.
+// Command deck is a terminal command center: browse files, drive git, run tasks,
+// and send HTTP requests, handing off to micro for editing.
 package main
 
 import (

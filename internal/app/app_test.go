@@ -1,12 +1,14 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"deck/internal/config"
+	"deck/internal/git"
 	"deck/internal/ui"
 )
 
@@ -52,40 +54,86 @@ func TestTabCyclesPanes(t *testing.T) {
 }
 
 func TestNumberKeysJump(t *testing.T) {
-	m := newModel()
-	jumped, _ := m.Update(keyMsg("3"))
-	if got := jumped.(Model).active; got != tabAI {
-		t.Errorf("after '3', active = %d, want tabAI (%d)", got, tabAI)
+	cases := []struct {
+		key  string
+		want tab
+	}{
+		{"1", tabFiles},
+		{"2", tabGit},
+		{"3", tabRun},
+		{"4", tabHTTP},
+	}
+	for _, c := range cases {
+		jumped, _ := newModel().Update(keyMsg(c.key))
+		if got := jumped.(Model).active; got != c.want {
+			t.Errorf("after %q, active = %d, want %d", c.key, got, c.want)
+		}
 	}
 }
 
-func TestQDoesNotQuitWhileTypingInAI(t *testing.T) {
+func TestNoAITab(t *testing.T) {
+	if len(tabNames) != 4 || int(numTabs) != 4 {
+		t.Fatalf("tabNames = %v (numTabs %d), want 4 tabs", tabNames, numTabs)
+	}
+	for _, n := range tabNames {
+		if n == "AI" {
+			t.Error("the AI tab should be gone")
+		}
+	}
+}
+
+func TestQDoesNotQuitWhileTypingInHTTP(t *testing.T) {
 	m := newModel()
-	atAI, _ := m.Update(keyMsg("3")) // jump to AI tab (prompt always captures)
-	_, cmd := atAI.(Model).Update(keyMsg("q"))
+	atHTTP, _ := m.Update(keyMsg("4"))
+	_, cmd := atHTTP.(Model).Update(keyMsg("q"))
 	if isQuit(cmd) {
-		t.Error("'q' should be typed into the AI prompt, not quit, while on the AI tab")
+		t.Error("'q' should be typed into the HTTP input, not quit, while on the HTTP tab")
 	}
 }
 
 func TestCtrlCAlwaysQuits(t *testing.T) {
 	m := newModel()
-	atAI, _ := m.Update(keyMsg("3"))
-	_, cmd := atAI.(Model).Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	atHTTP, _ := m.Update(keyMsg("4"))
+	_, cmd := atHTTP.(Model).Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if !isQuit(cmd) {
-		t.Error("ctrl+c should quit even while the AI prompt is focused")
+		t.Error("ctrl+c should quit even while the HTTP input is focused")
 	}
 }
 
 func TestStatusLine(t *testing.T) {
-	got := statusLine("main", 3, 2, "claude/sonnet")
-	want := "⎇ main · 3 dirty · ▶ 2 running · claude/sonnet"
+	got := statusLine("deck", "main", 3, 2)
+	want := "deck · ⎇ main · 3 dirty · ▶ 2 running"
 	if got != want {
 		t.Errorf("statusLine = %q, want %q", got, want)
 	}
-	// Outside a repo with nothing running, only the backend shows.
-	if got := statusLine("", 0, 0, "claude/sonnet"); got != "claude/sonnet" {
-		t.Errorf("minimal statusLine = %q, want just the backend", got)
+	if got := statusLine("deck", "", 0, 0); got != "deck" {
+		t.Errorf("minimal statusLine = %q, want just the project", got)
+	}
+}
+
+func TestEditorCloseRefreshesGitWhileOnFiles(t *testing.T) {
+	m := newModel()
+	before := m.git.Reloads()
+	next, cmd := m.Update(editorClosedMsg{})
+	if cmd == nil {
+		t.Fatal("closing the editor should return a refresh command")
+	}
+	next, _ = next.(Model).Update(cmd())
+	got := next.(Model)
+	if got.active != tabFiles {
+		t.Fatalf("active = %d, want to stay on Files", got.active)
+	}
+	if got.git.Reloads() != before+1 {
+		t.Errorf("git reloads = %d, want %d: the refresh never reached the Git pane", got.git.Reloads(), before+1)
+	}
+}
+
+func TestCommitMsgReadyReachesGitFromAnotherTab(t *testing.T) {
+	m := newModel()
+	atRun, _ := m.Update(keyMsg("3"))
+	next, _ := atRun.(Model).Update(git.CommitMsgReady{Err: errors.New("boom")})
+	if v := next.(Model).git.View(); !strings.Contains(v, "boom") {
+		t.Error("CommitMsgReady should be delivered to the Git pane while another tab is active")
 	}
 }
 
@@ -117,10 +165,9 @@ func TestHelpTogglesOnlyWhenNotCapturing(t *testing.T) {
 		t.Error("'?' again should close full help")
 	}
 
-	// On the AI tab the prompt captures, so '?' is typed, not a help toggle.
-	atAI, _ := m.Update(keyMsg("3"))
-	typed, _ := atAI.(Model).Update(keyMsg("?"))
+	atHTTP, _ := m.Update(keyMsg("4"))
+	typed, _ := atHTTP.(Model).Update(keyMsg("?"))
 	if typed.(Model).showHelp {
-		t.Error("'?' while the AI prompt is focused should not toggle help")
+		t.Error("'?' while the HTTP input is focused should not toggle help")
 	}
 }

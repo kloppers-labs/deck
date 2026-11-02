@@ -7,8 +7,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Config holds user-tunable settings for deck. It mirrors the AI defaults used
-// by the micro aiassist plugin so behaviour is consistent across both tools.
+// Config holds user-tunable settings for deck. AIBackend and AIModel select the
+// CLI used by the Git tab's ctrl+g commit-message helper.
 type Config struct {
 	AIBackend string `toml:"ai_backend"`
 	AIModel   string `toml:"ai_model"`

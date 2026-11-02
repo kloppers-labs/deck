@@ -124,6 +124,20 @@ func TestCapturingWhileFiltering(t *testing.T) {
 	}
 }
 
+func TestNoAIKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"a", "t"} {
+		m := New(dir, "dracula")
+		m.SetSize(80, 24)
+		if _, cmd := m.Update(keyMsg(k)); cmd != nil {
+			t.Errorf("%q on a file returned a command; the AI keys should be gone", k)
+		}
+	}
+}
+
 func keyMsg(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }

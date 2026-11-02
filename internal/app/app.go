@@ -1,12 +1,17 @@
 // Package app is deck's root Bubble Tea model. It owns the tab bar, global
-// keymap, and help footer, and dispatches to the Files, Git, AI, and Run panes.
-// It also brokers cross-pane actions: opening files in micro, sending a file to
-// the AI pane, and generating a commit message from the staged diff.
+// keymap, and help footer, and dispatches to the Files, Git, Run, and HTTP panes.
+// It also brokers cross-pane actions: opening files in micro and generating a
+// commit message from the staged diff.
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -14,7 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"deck/internal/ai"
+	"deck/internal/aicommit"
 	"deck/internal/config"
 	"deck/internal/editor"
 	"deck/internal/files"
@@ -29,13 +34,14 @@ type tab int
 const (
 	tabFiles tab = iota
 	tabGit
-	tabAI
 	tabRun
 	tabHTTP
 	numTabs
 )
 
-var tabNames = []string{"Files", "Git", "AI", "Run", "HTTP"}
+var tabNames = []string{"Files", "Git", "Run", "HTTP"}
+
+const commitMsgTimeout = 90 * time.Second
 
 // editorClosedMsg fires when the launched editor exits and deck regains the TTY.
 type editorClosedMsg struct{ err error }
@@ -43,10 +49,10 @@ type editorClosedMsg struct{ err error }
 // Model is the top-level application state.
 type Model struct {
 	cfg      config.Config
+	project  string
 	active   tab
 	files    files.Model
 	git      git.Pane
-	ai       ai.Pane
 	run      runner.Pane
 	httpc    httpc.Pane
 	help     help.Model
@@ -58,14 +64,22 @@ type Model struct {
 // New builds the root model from loaded config.
 func New(cfg config.Config) Model {
 	return Model{
-		cfg:   cfg,
-		files: files.New("", cfg.Theme),
-		git:   git.NewPane(cfg.Theme),
-		ai:    ai.NewPane(cfg.AIBackend, cfg.AIModel),
-		run:   runner.NewPane(cfg.Tasks, ""),
-		httpc: httpc.NewPane(cfg.Theme),
-		help:  newHelp(),
+		cfg:     cfg,
+		project: projectName(),
+		files:   files.New("", cfg.Theme),
+		git:     git.NewPane(cfg.Theme, aicommit.Available(cfg.AIBackend)),
+		run:     runner.NewPane(cfg.Tasks, ""),
+		httpc:   httpc.NewPane(cfg.Theme),
+		help:    newHelp(),
 	}
+}
+
+func projectName() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "deck"
+	}
+	return filepath.Base(wd)
 }
 
 // newHelp builds the help view styled with deck's Dracula palette.
@@ -98,7 +112,6 @@ func (m *Model) resize(w, h int) {
 	paneH := h - chromeHeight
 	m.files.SetSize(w, paneH)
 	m.git.SetSize(w, paneH)
-	m.ai.SetSize(w, paneH)
 	m.run.SetSize(w, paneH)
 	m.httpc.SetSize(w, paneH)
 }
@@ -107,8 +120,6 @@ func (m Model) capturing() bool {
 	switch m.active {
 	case tabFiles:
 		return m.files.Capturing()
-	case tabAI:
-		return m.ai.Capturing()
 	case tabGit:
 		return m.git.Capturing()
 	case tabHTTP:
@@ -143,29 +154,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return editorClosedMsg{err: err}
 		})
 
-	case files.SendToAIMsg:
-		m.active = tabAI
-		var cmd tea.Cmd
-		m.ai, cmd = m.ai.AskAbout(msg.Path)
-		return m, cmd
-
-	case files.SendTestsMsg:
-		m.active = tabAI
-		var cmd tea.Cmd
-		m.ai, cmd = m.ai.GenerateTests(msg.Path)
-		return m, cmd
-
 	case git.GenCommitMsgRequest:
-		return m, m.generateCommitMsg()
+		return m, generateCommitMsg(msg.Ctx, m.cfg.AIBackend, m.cfg.AIModel)
 
 	case editorClosedMsg:
 		return m, git.Refresh
 
-	// Async pane output is routed by type, not by the active tab, so a running
-	// task or an in-flight AI request keeps streaming when the user switches tabs.
-	case ai.ChunkMsg, ai.DoneMsg:
+	// Routed by type, not by the active tab, so these land whichever tab is showing.
+	case git.RefreshMsg, git.CommitMsgReady:
 		var cmd tea.Cmd
-		m.ai, cmd = m.ai.Update(msg)
+		m.git, cmd = m.git.Update(msg)
 		return m, cmd
 
 	case runner.OutputMsg, runner.ExitMsg:
@@ -180,11 +178,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Spinner ticks animate regardless of the active tab. Each pane owns its own
 	// spinner; the tick's ID means only the owning spinner advances, so fanning
-	// the message out to all three is safe and never amplifies the tick rate.
+	// the message out to every pane is safe and never amplifies the tick rate.
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
 		var cmd tea.Cmd
-		m.ai, cmd = m.ai.Update(msg)
+		m.git, cmd = m.git.Update(msg)
 		cmds = append(cmds, cmd)
 		m.httpc, cmd = m.httpc.Update(msg)
 		cmds = append(cmds, cmd)
@@ -225,9 +223,6 @@ func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case key.Matches(msg, ui.Keys.Git):
 		m.active = tabGit
 		return m.focusCmd(), true
-	case key.Matches(msg, ui.Keys.AI):
-		m.active = tabAI
-		return m.focusCmd(), true
 	case key.Matches(msg, ui.Keys.Run):
 		m.active = tabRun
 		return m.focusCmd(), true
@@ -245,8 +240,6 @@ func (m Model) routeToPane(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files, cmd = m.files.Update(msg)
 	case tabGit:
 		m.git, cmd = m.git.Update(msg)
-	case tabAI:
-		m.ai, cmd = m.ai.Update(msg)
 	case tabRun:
 		m.run, cmd = m.run.Update(msg)
 	case tabHTTP:
@@ -255,21 +248,25 @@ func (m Model) routeToPane(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) generateCommitMsg() tea.Cmd {
-	backend, model := m.cfg.AIBackend, m.cfg.AIModel
+func generateCommitMsg(parent context.Context, backend, model string) tea.Cmd {
+	if parent == nil {
+		parent = context.Background()
+	}
 	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(parent, commitMsgTimeout)
+		defer cancel()
 		diff, err := git.StagedDiff()
-		if err != nil || strings.TrimSpace(diff) == "" {
-			return git.CommitMsgReady{Text: ""}
-		}
-		prompt := "Write a concise git commit message for this staged diff. " +
-			"Use an imperative subject under 60 characters; add a short body only if it helps. " +
-			"Output only the message.\n\n" + diff
-		out, err := ai.Run(backend, model, prompt)
 		if err != nil {
-			return git.CommitMsgReady{Text: ""}
+			return git.CommitMsgReady{Err: fmt.Errorf("staged diff: %w", err)}
 		}
-		return git.CommitMsgReady{Text: out}
+		if strings.TrimSpace(diff) == "" {
+			return git.CommitMsgReady{Err: errors.New("nothing staged")}
+		}
+		text, err := aicommit.Generate(ctx, backend, model, diff)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s", commitMsgTimeout)
+		}
+		return git.CommitMsgReady{Text: text, Err: err}
 	}
 }
 
@@ -318,17 +315,16 @@ func (m Model) tabBar() string {
 	return row
 }
 
-// statusBar renders the persistent project-state line: branch, dirty count,
-// running processes, and the AI backend/model.
+// statusBar renders the persistent project-state line: project, branch, dirty
+// count, and running processes.
 func (m Model) statusBar() string {
-	line := statusLine(m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount(),
-		m.ai.Backend()+"/"+m.ai.ModelName())
+	line := statusLine(m.project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
 	return ui.StatusBar.Width(m.width).Render(line)
 }
 
 // statusLine assembles the status-bar text; pure so it can be unit-tested.
-func statusLine(branch string, dirty, running int, backend string) string {
-	var parts []string
+func statusLine(project, branch string, dirty, running int) string {
+	parts := []string{project}
 	if branch != "" {
 		parts = append(parts, "⎇ "+branch)
 	}
@@ -338,7 +334,6 @@ func statusLine(branch string, dirty, running int, backend string) string {
 	if running > 0 {
 		parts = append(parts, fmt.Sprintf("▶ %d running", running))
 	}
-	parts = append(parts, backend)
 	return strings.Join(parts, " · ")
 }
 
@@ -348,8 +343,6 @@ func (m Model) paneView() string {
 		return m.files.View()
 	case tabGit:
 		return m.git.View()
-	case tabAI:
-		return m.ai.View()
 	case tabRun:
 		return m.run.View()
 	case tabHTTP:
@@ -380,8 +373,6 @@ func (m Model) paneBindings() []key.Binding {
 		return m.files.HelpBindings()
 	case tabGit:
 		return m.git.HelpBindings()
-	case tabAI:
-		return m.ai.HelpBindings()
 	case tabRun:
 		return m.run.HelpBindings()
 	case tabHTTP:

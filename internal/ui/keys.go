@@ -9,7 +9,6 @@ type KeyMap struct {
 	PrevTab   key.Binding
 	Files     key.Binding
 	Git       key.Binding
-	AI        key.Binding
 	Run       key.Binding
 	HTTP      key.Binding
 	Quit      key.Binding
@@ -35,17 +34,13 @@ var Keys = KeyMap{
 		key.WithKeys("2"),
 		key.WithHelp("2", "git"),
 	),
-	AI: key.NewBinding(
-		key.WithKeys("3"),
-		key.WithHelp("3", "ai"),
-	),
 	Run: key.NewBinding(
-		key.WithKeys("4"),
-		key.WithHelp("4", "run"),
+		key.WithKeys("3"),
+		key.WithHelp("3", "run"),
 	),
 	HTTP: key.NewBinding(
-		key.WithKeys("5"),
-		key.WithHelp("5", "http"),
+		key.WithKeys("4"),
+		key.WithHelp("4", "http"),
 	),
 	// Quit also accepts ctrl+c so the help line reads "q", but ctrl+c is matched
 	// separately via ForceQuit so it can bypass the capturing gate.
@@ -65,7 +60,7 @@ var Keys = KeyMap{
 
 // NavBindings groups the tab-navigation bindings for the full help view.
 func (k KeyMap) NavBindings() []key.Binding {
-	return []key.Binding{k.Tab, k.PrevTab, k.Files, k.Git, k.AI, k.Run, k.HTTP}
+	return []key.Binding{k.Tab, k.PrevTab, k.Files, k.Git, k.Run, k.HTTP}
 }
 
 // GlobalBindings groups the always-available bindings shown in the footer and

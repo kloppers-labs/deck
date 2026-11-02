@@ -1,6 +1,8 @@
 package git
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,18 +23,20 @@ import (
 )
 
 // GenCommitMsgRequest asks the root model to generate a commit message from the
-// staged diff via the AI pane. The app replies with CommitMsgReady.
-type GenCommitMsgRequest struct{}
+// staged diff; Ctx is cancelled when the user aborts. The app replies with CommitMsgReady.
+type GenCommitMsgRequest struct{ Ctx context.Context }
 
-// CommitMsgReady carries an AI-generated commit message back into the pane.
-type CommitMsgReady struct{ Text string }
+// CommitMsgReady carries a generated commit message, or the reason generation failed.
+type CommitMsgReady struct {
+	Text string
+	Err  error
+}
 
-// refreshMsg triggers a status reload.
-type refreshMsg struct{}
+// RefreshMsg triggers a status reload.
+type RefreshMsg struct{}
 
-// Refresh is a command that reloads git status; the app fires it when the Git
-// tab gains focus.
-func Refresh() tea.Msg { return refreshMsg{} }
+// Refresh is a command that reloads git status.
+func Refresh() tea.Msg { return RefreshMsg{} }
 
 // branchItem adapts a branch name to list.Item for the picker.
 type branchItem string
@@ -74,6 +79,11 @@ type Pane struct {
 	commitText string
 	confirm    *huh.Confirm
 	confirmVal *bool
+	commitAI   bool
+	generating bool
+	cancelGen  *context.CancelFunc
+	spin       spinner.Model
+	reloads    int
 	branching  bool
 	branchList list.Model
 	showLog    bool
@@ -85,11 +95,14 @@ type Pane struct {
 }
 
 // NewPane builds the Git tab. theme is the chroma style name for diff
-// highlighting.
-func NewPane(theme string) Pane {
+// highlighting; commitAI reports whether the ctrl+g commit helper's CLI is installed.
+func NewPane(theme string, commitAI bool) Pane {
 	ti := textinput.New()
-	ti.Placeholder = "commit message (Enter to confirm, Esc to cancel, ctrl+g for AI)"
-	ti.Prompt = "✎ "
+	ti.Placeholder = "commit message (Enter to confirm, Esc to cancel)"
+	if commitAI {
+		ti.Placeholder = "commit message (Enter to confirm, Esc to cancel, ctrl+g for AI)"
+	}
+	ti.Prompt = commitPrompt
 	// Default the confirm to Yes since the user reaches it by submitting a
 	// message. confirmVal is a stable heap pointer shared across pane copies.
 	confirmVal := new(bool)
@@ -105,8 +118,10 @@ func NewPane(theme string) Pane {
 	bl.SetShowStatusBar(false)
 	bl.SetShowHelp(false)
 	bl.KeyMap.Quit = key.Binding{} // deck's global "q" owns quit
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(ui.Active))
 	p := Pane{diff: viewport.New(0, 0), commitBox: ti, theme: theme,
-		confirm: cf, confirmVal: confirmVal, branchList: bl}
+		confirm: cf, confirmVal: confirmVal, branchList: bl,
+		commitAI: commitAI, cancelGen: new(context.CancelFunc), spin: sp}
 	p.reload()
 	return p
 }
@@ -124,7 +139,10 @@ func (p *Pane) SetSize(w, h int) {
 	p.branchList.SetSize(w-listW-4, h-4)
 }
 
+const commitPrompt = "✎ "
+
 func (p *Pane) reload() {
+	p.reloads++
 	if !IsRepo() {
 		p.err = nil
 		p.changes = nil
@@ -216,12 +234,18 @@ func (p *Pane) selected() (Change, bool) {
 // Update handles staging, committing, branch switching, and diff scrolling.
 func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 	switch msg := msg.(type) {
-	case refreshMsg:
+	case RefreshMsg:
 		p.reload()
 		return p, nil
 	case CommitMsgReady:
-		p.commitBox.SetValue(strings.TrimSpace(msg.Text))
-		return p, nil
+		return p.commitMsgReady(msg), nil
+	case spinner.TickMsg:
+		if !p.generating {
+			return p, nil
+		}
+		var cmd tea.Cmd
+		p.spin, cmd = p.spin.Update(msg)
+		return p, cmd
 	case tea.KeyMsg:
 		if p.committing {
 			return p.updateCommitting(msg)
@@ -322,9 +346,14 @@ func (p Pane) updateCommitting(msg tea.KeyMsg) (Pane, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "esc":
+		if p.generating {
+			p.stopGenerating()
+			p.status = "commit message generation cancelled"
+			return p, nil
+		}
 		return p.cancelCommit(), nil
 	case "ctrl+g":
-		return p, func() tea.Msg { return GenCommitMsgRequest{} }
+		return p.startGenerating()
 	case "enter":
 		text := strings.TrimSpace(p.commitBox.Value())
 		if text == "" {
@@ -380,6 +409,41 @@ func (p Pane) doCommit() (Pane, tea.Cmd) {
 	return p, nil
 }
 
+func (p Pane) startGenerating() (Pane, tea.Cmd) {
+	if p.generating {
+		return p, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	*p.cancelGen = cancel
+	p.generating = true
+	p.status = "generating commit message…"
+	return p, tea.Batch(p.spin.Tick, func() tea.Msg { return GenCommitMsgRequest{Ctx: ctx} })
+}
+
+func (p *Pane) stopGenerating() {
+	p.generating = false
+	if p.cancelGen != nil && *p.cancelGen != nil {
+		(*p.cancelGen)()
+		*p.cancelGen = nil
+	}
+}
+
+func (p Pane) commitMsgReady(msg CommitMsgReady) Pane {
+	if errors.Is(msg.Err, context.Canceled) {
+		return p
+	}
+	p.stopGenerating()
+	if msg.Err != nil {
+		p.status = "AI commit message failed: " + msg.Err.Error()
+		return p
+	}
+	p.status = ""
+	if p.committing {
+		p.commitBox.SetValue(strings.TrimSpace(msg.Text))
+	}
+	return p
+}
+
 // backToEdit returns from the confirm step to the (still-populated) edit box.
 func (p Pane) backToEdit() Pane {
 	p.confirming = false
@@ -390,6 +454,7 @@ func (p Pane) backToEdit() Pane {
 
 // cancelCommit tears down the entire commit flow.
 func (p Pane) cancelCommit() Pane {
+	p.stopGenerating()
 	p.committing = false
 	p.confirming = false
 	p.commitText = ""
@@ -454,11 +519,19 @@ func (p Pane) View() string {
 			ui.Muted.Render("  (enter switch · / filter · esc cancel)") +
 			"\n\n" + p.branchList.View()
 	case p.confirming:
-		right = p.commitBox.View() + "\n" + p.confirm.View() + "\n" + p.diff.View()
+		right = p.commitBoxView() + "\n" + p.confirm.View() + "\n" + p.diff.View()
 	case p.committing:
-		right = p.commitBox.View() + "\n" + p.diff.View()
+		right = p.commitBoxView() + "\n" + p.diff.View()
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, ui.Pane.Render(right))
+}
+
+func (p Pane) commitBoxView() string {
+	box := p.commitBox
+	if p.generating {
+		box.Prompt = p.spin.View() + " "
+	}
+	return box.View()
 }
 
 // Capturing reports whether a modal flow owns the keyboard: the commit edit
@@ -468,20 +541,25 @@ func (p Pane) Capturing() bool { return p.committing || p.confirming || p.branch
 // Branch reports the checked-out branch for the status bar.
 func (p Pane) Branch() string { return p.branch }
 
+// Reloads counts status reloads so callers can observe that a refresh landed.
+func (p Pane) Reloads() int { return p.reloads }
+
 // DirtyCount reports the number of changed paths for the status bar.
 func (p Pane) DirtyCount() int { return len(p.changes) }
 
 // HelpBindings returns the Git-pane key hints shown in the help footer.
 func (p Pane) HelpBindings() []key.Binding {
-	return []key.Binding{
+	bindings := []key.Binding{
 		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
 		key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "stage")),
 		key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "commit")),
 		key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "branches")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
-		key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "AI msg")),
-		key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	}
+	if p.commitAI {
+		bindings = append(bindings, key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "AI msg")))
+	}
+	return append(bindings, key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")))
 }
 
 func hasStaged(changes []Change) bool {
