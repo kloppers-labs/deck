@@ -1,6 +1,5 @@
-// Package files is deck's file navigator: a directory listing on the left and a
-// syntax-highlighted preview on the right. Selecting a file emits an OpenMsg so
-// the root model can hand off to micro.
+// Package files is deck's Files tab: a directory listing beside the read-only code
+// viewer. Selecting a file loads it asynchronously; enter focuses the viewer.
 package files
 
 import (
@@ -16,25 +15,38 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"deck/internal/config"
+	"deck/internal/editor"
 	"deck/internal/ui"
+	"deck/internal/viewer"
 )
 
 // ListTop is the row, local to the pane, where the first file row is drawn: the
 // path header, then the list's reserved filter row.
 const ListTop = 2
 
-const wheelLines = 3
+const (
+	viewerInsetX = 2
+	viewerInsetY = 1
+)
 
-// OpenMsg asks the root model to open Path in the editor.
-type OpenMsg struct{ Path string }
+// ReloadMsg re-reads the listing and the open file, keeping the position.
+type ReloadMsg struct{}
 
-// entry is one row in the listing; it doubles as the list.Item, filtering on
-// the file name.
+// RevealMsg selects Target's file in the listing and opens it in the viewer at
+// Target's position.
+type RevealMsg struct{ Target editor.Target }
+
+func (ReloadMsg) RouteTo() ui.Dest { return ui.DestFiles }
+func (RevealMsg) RouteTo() ui.Dest { return ui.DestFiles }
+
+// ReloadCurrent is a command that reloads the Files tab in place.
+func ReloadCurrent() tea.Msg { return ReloadMsg{} }
+
 type entry struct {
 	name  string
 	isDir bool
@@ -42,8 +54,6 @@ type entry struct {
 
 func (e entry) FilterValue() string { return e.name }
 
-// fileDelegate renders one listing row: the name (with a trailing "/" for
-// directories) and a cursor marker on the selected row.
 type fileDelegate struct{}
 
 func (fileDelegate) Height() int                         { return 1 }
@@ -67,30 +77,31 @@ func (fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item)
 	fmt.Fprint(w, "  "+name)
 }
 
-// focus tracks which half of the pane owns the keyboard: the file list or the
-// preview viewport.
 const (
 	focusList = iota
-	focusPreview
+	focusViewer
 )
 
-// Model is the navigator state.
+// Model is the Files tab state.
 type Model struct {
 	root    string
 	dir     string
 	list    list.Model
-	preview viewport.Model
+	viewer  viewer.Model
 	focus   int
-	theme   string
 	clicks  ui.ClickTracker
 	width   int
 	height  int
 	err     error
+	shown   string
+	initCmd tea.Cmd
+	dirSel  map[string]string
+	spots   map[string]viewer.Spot
 }
 
-// New builds a navigator rooted at dir (defaulting to the working directory).
-// theme is the chroma/glamour style name used for the preview.
-func New(dir, theme string) Model {
+// New builds the Files tab rooted at dir (default: the working directory). Only the
+// directory is listed here; the first file loads from Init.
+func New(dir string, cfg config.Config) Model {
 	if dir == "" {
 		if wd, err := os.Getwd(); err == nil {
 			dir = wd
@@ -102,14 +113,34 @@ func New(dir, theme string) Model {
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
-	l.KeyMap.Quit = key.Binding{} // deck's global "q" owns quit
-	m := Model{root: dir, dir: dir, theme: theme, preview: viewport.New(0, 0), list: l}
-	m.load()
+	l.KeyMap.Quit = key.Binding{}
+	v := viewer.New(viewer.Options{
+		Root:              dir,
+		Theme:             cfg.Theme,
+		TabWidth:          cfg.Viewer.TabWidth,
+		ScrollLines:       cfg.Viewer.ScrollLines,
+		MaxHighlightBytes: cfg.Viewer.MaxHighlightBytes,
+		LineNumbers:       cfg.Viewer.LineNumbers,
+		Wrap:              cfg.Viewer.Wrap,
+	})
+	m := Model{
+		root:   dir,
+		dir:    dir,
+		list:   l,
+		viewer: v,
+		dirSel: map[string]string{},
+		spots:  map[string]viewer.Spot{},
+	}
+	m.load("")
+	m.initCmd = m.syncSelection()
 	return m
 }
 
-// readDir lists dir with directories first, each group sorted case-insensitively.
-// Dotfiles are included; "." is not, but ".." navigation is handled separately.
+// Init loads the initially selected file.
+func (m Model) Init() tea.Cmd { return m.initCmd }
+
+// readDir lists dir with directories first, each group sorted
+// case-insensitively. Symlinks to directories count as directories.
 func readDir(dir string) ([]entry, error) {
 	des, err := os.ReadDir(dir)
 	if err != nil {
@@ -117,13 +148,18 @@ func readDir(dir string) ([]entry, error) {
 	}
 	entries := make([]entry, 0, len(des))
 	for _, de := range des {
-		entries = append(entries, entry{name: de.Name(), isDir: de.IsDir()})
+		isDir := de.IsDir()
+		if de.Type()&fs.ModeSymlink != 0 {
+			if fi, err := os.Stat(filepath.Join(dir, de.Name())); err == nil {
+				isDir = fi.IsDir()
+			}
+		}
+		entries = append(entries, entry{name: de.Name(), isDir: isDir})
 	}
 	sortEntries(entries)
 	return entries, nil
 }
 
-// sortEntries orders directories before files, then alphabetically (fold-case).
 func sortEntries(entries []entry) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].isDir != entries[j].isDir {
@@ -133,18 +169,28 @@ func sortEntries(entries []entry) {
 	})
 }
 
-func (m *Model) load() {
+// load lists m.dir and selects prefer, else the entry remembered for this
+// directory, else the first.
+func (m *Model) load(prefer string) {
 	entries, err := readDir(m.dir)
 	m.err = err
 	items := make([]list.Item, len(entries))
 	for i, e := range entries {
 		items[i] = e
 	}
+	if prefer == "" {
+		prefer = m.dirSel[m.dir]
+	}
 	m.list.ResetFilter()
 	m.list.SetItems(items)
 	m.list.Select(0)
+	for i, e := range entries {
+		if e.name == prefer {
+			m.list.Select(i)
+			break
+		}
+	}
 	m.list.SetHeight(m.listHeight())
-	m.refreshPreview()
 }
 
 func (m Model) listHeight() int {
@@ -168,6 +214,9 @@ func (m Model) SelectedPath() string {
 	return ""
 }
 
+// ViewerLoc is the viewer's cursor location.
+func (m Model) ViewerLoc() viewer.Loc { return m.viewer.Loc() }
+
 func (m Model) selected() (entry, bool) {
 	if e, ok := m.list.SelectedItem().(entry); ok {
 		return e, true
@@ -175,8 +224,6 @@ func (m Model) selected() (entry, bool) {
 	return entry{}, false
 }
 
-// selectedName is the current selection's file name, or "" when none, used to
-// detect selection changes after the list handles a key.
 func (m Model) selectedName() string {
 	if e, ok := m.selected(); ok {
 		return e.name
@@ -184,128 +231,201 @@ func (m Model) selectedName() string {
 	return ""
 }
 
-func (m *Model) refreshPreview() {
-	e, ok := m.selected()
-	if !ok {
-		m.preview.SetContent("")
-		return
+func (m *Model) rememberSpot() {
+	if p := m.viewer.Path(); p != "" && m.viewer.Loaded() {
+		m.spots[p] = m.viewer.Spot()
 	}
-	if e.isDir {
-		m.preview.SetContent(ui.Muted.Render("📁 " + e.name + "/"))
-		return
-	}
-	m.preview.SetContent(Preview(filepath.Join(m.dir, e.name), m.preview.Width, m.theme))
-	m.preview.GotoTop()
 }
 
-// SetSize sets the pane's outer box: the list column plus the bordered preview.
+// syncSelection points the viewer at the selected entry, loading files
+// asynchronously and restoring the last position seen in each.
+func (m *Model) syncSelection() tea.Cmd {
+	path := m.SelectedPath()
+	if path == m.shown {
+		return nil
+	}
+	m.rememberSpot()
+	m.shown = path
+	e, ok := m.selected()
+	switch {
+	case !ok && m.err == nil:
+		m.viewer = m.viewer.ShowNote("empty directory")
+		return nil
+	case !ok:
+		m.viewer = m.viewer.ShowNote("")
+		return nil
+	case e.isDir:
+		m.viewer = m.viewer.ShowNote("📁 " + e.name + "/")
+		return nil
+	}
+	var at *viewer.Spot
+	if s, ok := m.spots[path]; ok {
+		at = &s
+	}
+	var cmd tea.Cmd
+	m.viewer, cmd = m.viewer.Open(path, at)
+	return cmd
+}
+
+func (m *Model) chdir(dir, prefer string) tea.Cmd {
+	if name := m.selectedName(); name != "" {
+		m.dirSel[m.dir] = name
+	}
+	m.dir = dir
+	m.load(prefer)
+	return m.syncSelection()
+}
+
+func (m *Model) setFocus(f int) {
+	m.focus = f
+	m.viewer.SetFocused(f == focusViewer)
+}
+
+// SetSize sets the pane's outer box: the list column plus the bordered viewer.
 func (m *Model) SetSize(w, h int) {
 	m.width, m.height = w, h
-	listW := m.listWidth()
-	m.list.SetSize(listW, m.listHeight())
-	m.preview.Width = max(w-listW-4, 0)
-	m.preview.Height = max(h-2, 0)
-	m.refreshPreview()
+	m.list.SetSize(m.listWidth(), m.listHeight())
+	m.viewer.SetSize(max(w-m.listWidth()-2*viewerInsetX, 0), max(h-2*viewerInsetY, 0))
 }
 
-// Update handles navigation keys and forwards scrolling to the preview pane.
-// "f" hands the keyboard to the preview viewport so the user can scroll it
-// without moving the file cursor; "esc" returns focus to the list.
+// ResizeCmd re-renders width-dependent viewer content after SetSize.
+func (m Model) ResizeCmd() tea.Cmd { return m.viewer.ResizeCmd() }
+
+// Update routes viewer messages to the viewer, keys by focus and mouse events
+// by region.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if mm, ok := msg.(tea.MouseMsg); ok {
-		return m.mouse(mm)
-	}
-	k, ok := msg.(tea.KeyMsg)
-	if !ok {
+	switch msg := msg.(type) {
+	case viewer.Msg:
 		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
+		m.viewer, cmd = m.viewer.Update(msg)
 		return m, cmd
-	}
-
-	filtering := m.list.FilterState() == list.Filtering
-
-	// f/esc focus toggle. While filtering these keys belong to the filter box
-	// (esc cancels the filter), so the toggle is suppressed.
-	if !filtering {
-		switch k.String() {
-		case "f":
-			m.focus = focusPreview
-			return m, nil
-		case "esc":
-			m.focus = focusList
-			return m, nil
+	case ReloadMsg:
+		return m.reload()
+	case RevealMsg:
+		return m.reveal(msg.Target)
+	case tea.MouseMsg:
+		return m.mouse(msg)
+	case tea.KeyMsg:
+		if m.focus == focusViewer {
+			return m.viewerKey(msg)
 		}
+		return m.listKey(msg)
 	}
-
-	// Preview focus: every key scrolls the viewport; the file cursor never moves.
-	if m.focus == focusPreview {
-		var cmd tea.Cmd
-		m.preview, cmd = m.preview.Update(msg)
-		return m, cmd
-	}
-
-	// List focus: intercept deck navigation semantics the list doesn't know,
-	// unless we're typing into the filter.
-	if !filtering {
-		if model, cmd, handled := m.listKey(k); handled {
-			return model, cmd
-		}
-	}
-
-	// Everything else (up/down/j/k, g/G, "/", page keys) drives the list,
-	// yielding filtering and pagination for free.
-	prev := m.selectedName()
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
-	if m.selectedName() != prev {
-		m.refreshPreview()
-	}
 	return m, cmd
 }
 
-// listKey handles the deck-specific list keys (activate, up-a-dir), reporting
-// whether it consumed the key; movement and filtering are left to the list.
-func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
-	switch msg.String() {
-	case "enter", "l", "right":
-		model, cmd := m.activate()
-		return model, cmd, true
-	case "backspace", "h", "left", "-":
-		m.dir = filepath.Dir(m.dir)
-		m.load()
-		return m, nil, true
+func (m Model) viewerKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if msg.Type == tea.KeyEsc && !m.viewer.WantsEsc() {
+		m.setFocus(focusList)
+		return m, nil
 	}
-	return m, nil, false
+	var cmd tea.Cmd
+	m.viewer, cmd = m.viewer.Update(msg)
+	return m, cmd
+}
+
+func (m Model) listKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.list.FilterState() != list.Filtering {
+		switch msg.String() {
+		case "enter", "l", "right":
+			return m.activate()
+		case "backspace", "h", "left", "-":
+			cmd := m.chdir(filepath.Dir(m.dir), filepath.Base(m.dir))
+			return m, cmd
+		case "e":
+			return m, m.openEditor()
+		}
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	sync := m.syncSelection()
+	return m, tea.Batch(cmd, sync)
+}
+
+func (m Model) openEditor() tea.Cmd {
+	e, ok := m.selected()
+	if !ok || e.isDir {
+		return nil
+	}
+	t := editor.Target{Path: filepath.Join(m.dir, e.name), Line: 1, Col: 1}
+	return func() tea.Msg { return editor.OpenMsg{Target: t} }
+}
+
+func (m Model) activate() (Model, tea.Cmd) {
+	e, ok := m.selected()
+	if !ok {
+		return m, nil
+	}
+	if e.isDir {
+		cmd := m.chdir(filepath.Join(m.dir, e.name), "")
+		return m, cmd
+	}
+	cmd := m.syncSelection()
+	m.setFocus(focusViewer)
+	return m, cmd
+}
+
+func (m Model) reload() (Model, tea.Cmd) {
+	path := m.SelectedPath()
+	m.load(m.selectedName())
+	if p := m.SelectedPath(); p == path && p != "" && p == m.viewer.Path() {
+		var cmd tea.Cmd
+		m.viewer, cmd = m.viewer.Reload()
+		return m, cmd
+	}
+	cmd := m.syncSelection()
+	return m, cmd
+}
+
+func (m Model) reveal(t editor.Target) (Model, tea.Cmd) {
+	if t.Path == "" {
+		return m, nil
+	}
+	if dir := filepath.Dir(t.Path); dir != m.dir {
+		if name := m.selectedName(); name != "" {
+			m.dirSel[m.dir] = name
+		}
+		m.dir = dir
+	}
+	m.load(filepath.Base(t.Path))
+	m.rememberSpot()
+	m.shown = t.Path
+	spot := viewer.Spot{Line: max(t.Line-1, 0), Col: max(t.Col-1, 0), Top: t.Top - 1}
+	var cmd tea.Cmd
+	m.viewer, cmd = m.viewer.Open(t.Path, &spot)
+	m.setFocus(focusViewer)
+	return m, cmd
+}
+
+func (m Model) viewerRect() ui.Rect {
+	return ui.Rect{X: m.listWidth() + viewerInsetX, Y: viewerInsetY, W: max(m.width-m.listWidth()-2*viewerInsetX, 0), H: max(m.height-2*viewerInsetY, 0)}
 }
 
 func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	listW := m.listWidth()
-	if tea.MouseEvent(msg).IsWheel() {
-		down := msg.Button == tea.MouseButtonWheelDown
-		if msg.X >= listW {
-			if down {
-				m.preview.ScrollDown(wheelLines)
-			} else {
-				m.preview.ScrollUp(wheelLines)
-			}
-			return m, nil
+	if msg.X >= listW {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.setFocus(focusViewer)
 		}
-		prev := m.selectedName()
-		if down {
+		local := msg
+		local.X, local.Y = m.viewerRect().Local(msg.X, msg.Y)
+		var cmd tea.Cmd
+		m.viewer, cmd = m.viewer.Update(local)
+		return m, cmd
+	}
+	if tea.MouseEvent(msg).IsWheel() {
+		switch msg.Button {
+		case tea.MouseButtonWheelDown:
 			m.list.CursorDown()
-		} else {
+		case tea.MouseButtonWheelUp:
 			m.list.CursorUp()
 		}
-		if m.selectedName() != prev {
-			m.refreshPreview()
-		}
-		return m, nil
+		cmd := m.syncSelection()
+		return m, cmd
 	}
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return m, nil
-	}
-	if msg.X >= listW {
-		m.focus = focusPreview
 		return m, nil
 	}
 	if m.list.FilterState() == list.Filtering {
@@ -316,51 +436,45 @@ func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if row < 0 || row >= m.list.Paginator.PerPage || idx >= len(m.list.VisibleItems()) {
 		return m, nil
 	}
-	m.focus = focusList
-	prev := m.selectedName()
+	m.setFocus(focusList)
 	m.list.Select(idx)
-	if m.selectedName() != prev {
-		m.refreshPreview()
-	}
+	cmd := m.syncSelection()
 	if ui.IsDouble(m.clicks.Press(msg.X, msg.Y, time.Now())) {
-		return m.activate()
+		next, open := m.activate()
+		return next, tea.Batch(cmd, open)
 	}
-	return m, nil
+	return m, cmd
 }
 
-// Capturing reports that the "/" filter owns the keyboard. Reading the preview
-// never captures.
+// Capturing reports whether typed text belongs to the pane: the list filter,
+// or a viewer prompt or pending chord. Reading never captures.
 func (m Model) Capturing() bool {
-	return m.list.FilterState() == list.Filtering
+	if m.list.FilterState() == list.Filtering {
+		return true
+	}
+	return m.focus == focusViewer && m.viewer.Capturing()
 }
 
-// HelpBindings returns the Files-pane key hints shown in the help footer.
-func (m Model) HelpBindings() []key.Binding {
-	return []key.Binding{
+var (
+	listBindings = []key.Binding{
 		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-		key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "up dir")),
+		key.NewBinding(key.WithKeys("enter", "l"), key.WithHelp("enter", "view")),
+		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
+		key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←", "up dir")),
 		key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "focus preview")),
-		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list")),
 	}
+	backToList = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "list"))
+)
+
+// HelpBindings returns the key hints for whichever region has focus.
+func (m Model) HelpBindings() []key.Binding {
+	if m.focus == focusViewer {
+		return append(m.viewer.HelpBindings(), backToList)
+	}
+	return listBindings
 }
 
-func (m Model) activate() (Model, tea.Cmd) {
-	e, ok := m.selected()
-	if !ok {
-		return m, nil
-	}
-	if e.isDir {
-		m.dir = filepath.Join(m.dir, e.name)
-		m.load()
-		return m, nil
-	}
-	path := filepath.Join(m.dir, e.name)
-	return m, func() tea.Msg { return OpenMsg{Path: path} }
-}
-
-// View renders the listing and preview side by side, filling exactly the box
+// View renders the listing and viewer side by side, filling exactly the box
 // given to SetSize.
 func (m Model) View() string {
 	listW := m.listWidth()
@@ -370,15 +484,15 @@ func (m Model) View() string {
 		col += "\n" + ui.Err.Render(ui.FitWidth(loadError(m.err), listW-1, "…"))
 	}
 	paneStyle := ui.Pane
-	if m.focus == focusPreview {
+	if m.focus == focusViewer {
 		paneStyle = ui.PaneActive
 	}
-	preview := paneStyle.Render(ui.Fit(m.preview.View(), m.preview.Width, m.preview.Height))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, ui.Fit(col, listW, m.height), preview)
+	r := m.viewerRect()
+	pane := paneStyle.Render(ui.Fit(m.viewer.View(), r.W, r.H))
+	body := lipgloss.JoinHorizontal(lipgloss.Top, ui.Fit(col, listW, m.height), pane)
 	return ui.Fit(body, m.width, m.height)
 }
 
-// loadError drops the path from a listing error; the header already shows it.
 func loadError(err error) string {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {

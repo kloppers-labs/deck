@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +11,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/config"
+	"deck/internal/editor"
+	"deck/internal/files"
 	"deck/internal/git"
 	"deck/internal/httpc"
 	"deck/internal/ui"
@@ -142,8 +146,7 @@ func TestEditorCloseRefreshesGitWhileOnFiles(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("closing the editor should return a refresh command")
 	}
-	next, _ = next.(Model).Update(cmd())
-	got := next.(Model)
+	got := update(t, next.(Model), collect(cmd)...)
 	if got.active != tabFiles {
 		t.Fatalf("active = %d, want to stay on Files", got.active)
 	}
@@ -206,6 +209,8 @@ func TestAsyncRoutedWhileOtherTabActive(t *testing.T) {
 			func(m Model) bool { return strings.Contains(ansi.Strip(m.git.View()), "routed-boom") }},
 		{"http response", "1", httpc.RespMsg{}, ui.DestHTTP,
 			func(m Model) bool { return strings.Contains(ansi.Strip(m.httpc.View()), "0 bytes") }},
+		{"files reveal", "2", files.RevealMsg{Target: editor.Target{Path: appGo(), Line: 3}}, ui.DestFiles,
+			func(m Model) bool { return m.files.SelectedPath() == appGo() && m.files.ViewerLoc().Path == appGo() }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -255,5 +260,38 @@ func TestRunnerOutputRoutedWhileOtherTabActive(t *testing.T) {
 	}
 	if exit == nil || m.run.RunningCount() != 0 {
 		t.Error("the task's exit did not reach the Run pane while Files was active")
+	}
+}
+
+func appGo() string {
+	wd, _ := os.Getwd()
+	return filepath.Join(wd, "app.go")
+}
+
+func TestEditorOpenMsgLaunchesEditor(t *testing.T) {
+	_, cmd := sized(t, 120, 30).Update(editor.OpenMsg{Target: editor.Target{Path: appGo(), Line: 3, Col: 2}})
+	if cmd == nil {
+		t.Error("editor.OpenMsg should hand off to the editor")
+	}
+}
+
+func TestEditorCloseReloadsFiles(t *testing.T) {
+	_, cmd := sized(t, 120, 30).Update(editorClosedMsg{})
+	var reload bool
+	for _, msg := range collect(cmd) {
+		if _, ok := msg.(files.ReloadMsg); ok {
+			reload = true
+		}
+	}
+	if !reload {
+		t.Error("closing the editor should reload the Files tab in place")
+	}
+}
+
+func TestInitLoadsFilesViewer(t *testing.T) {
+	m := sized(t, 120, 30)
+	m = update(t, m, collect(m.Init())...)
+	if m.files.ViewerLoc().Path == "" {
+		t.Error("Init should load the selected file into the viewer")
 	}
 }

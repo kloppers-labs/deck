@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"deck/internal/config"
 )
 
 func writeLines(t *testing.T, path string, n int) {
@@ -39,7 +41,7 @@ func TestViewIsExactlyTheOuterBox(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, size := range [][2]int{{60, 11}, {80, 19}, {200, 45}} {
-		m := New(dir, "dracula")
+		m := New(dir, config.Default())
 		m.SetSize(size[0], size[1])
 		v := m.View()
 		if got := lipgloss.Height(v); got != size[1] {
@@ -78,20 +80,19 @@ func TestHeaderPath(t *testing.T) {
 	}
 }
 
-func TestWheelOverPreviewScrollsPreview(t *testing.T) {
+func TestWheelOverViewerScrollsViewer(t *testing.T) {
 	dir := t.TempDir()
 	writeLines(t, filepath.Join(dir, "a-long.txt"), 300)
 	writeLines(t, filepath.Join(dir, "b.txt"), 3)
-	m := New(dir, "dracula")
-	m.SetSize(90, 20)
+	m := started(t, dir, 90, 20)
 	listW := m.listWidth()
 
 	m, _ = m.Update(wheel(listW+5, 4, true))
-	if m.preview.YOffset != 3 {
-		t.Errorf("preview offset = %d, want 3 after one wheel notch over the preview", m.preview.YOffset)
+	if top := m.viewer.Spot().Top; top != 3 {
+		t.Errorf("viewer top = %d, want 3 after one wheel notch over the viewer", top)
 	}
 	if m.list.Index() != 0 {
-		t.Errorf("wheel over the preview moved the file cursor to %d", m.list.Index())
+		t.Errorf("wheel over the viewer moved the file cursor to %d", m.list.Index())
 	}
 
 	m, _ = m.Update(wheel(1, 4, true))
@@ -105,8 +106,7 @@ func TestClickSelectsRow(t *testing.T) {
 	for _, name := range []string{"a.go", "b.go", "c.go"} {
 		writeLines(t, filepath.Join(dir, name), 1)
 	}
-	m := New(dir, "dracula")
-	m.SetSize(90, 20)
+	m := started(t, dir, 90, 20)
 	m, _ = m.Update(tea.MouseMsg{X: 1, Y: ListTop + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if got := filepath.Base(m.SelectedPath()); got != "c.go" {
 		t.Errorf("clicking the third row selected %q, want c.go", got)
@@ -116,8 +116,8 @@ func TestClickSelectsRow(t *testing.T) {
 		t.Errorf("clicking below the last row changed the selection to %q", got)
 	}
 	m, _ = m.Update(tea.MouseMsg{X: m.listWidth() + 3, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	if m.focus != focusPreview {
-		t.Error("clicking the preview should focus it")
+	if m.focus != focusViewer {
+		t.Error("clicking the viewer should focus it")
 	}
 }
 
@@ -125,7 +125,7 @@ func TestLongNamesTruncatedInRows(t *testing.T) {
 	dir := t.TempDir()
 	long := strings.Repeat("n", 80) + ".go"
 	writeLines(t, filepath.Join(dir, long), 1)
-	m := New(dir, "dracula")
+	m := New(dir, config.Default())
 	m.SetSize(60, 12)
 	for i, line := range strings.Split(m.View(), "\n") {
 		if strings.Contains(ansi.Strip(line), strings.Repeat("n", 30)) && !strings.Contains(ansi.Strip(line), "…") {
@@ -136,10 +136,10 @@ func TestLongNamesTruncatedInRows(t *testing.T) {
 
 func TestLoadErrorShownInPane(t *testing.T) {
 	dir := t.TempDir()
-	m := New(dir, "dracula")
+	m := New(dir, config.Default())
 	m.SetSize(80, 12)
 	m.dir = filepath.Join(dir, "gone")
-	m.load()
+	m.load("")
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "no such file") {
 		t.Errorf("load error not shown:\n%s", v)

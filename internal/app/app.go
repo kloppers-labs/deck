@@ -93,7 +93,7 @@ func New(cfg config.Config, warnings []config.Warning) Model {
 		cfg:      cfg,
 		warnings: warnings,
 		project:  projectName(),
-		files:    files.New("", cfg.Theme),
+		files:    files.New("", cfg),
 		git:      git.NewPane(cfg.Theme, aicommit.Available(cfg.AIBackend)),
 		run:      runner.NewPane(cfg.Tasks, ""),
 		httpc:    httpc.NewPane(cfg.Theme),
@@ -124,6 +124,10 @@ func newKeyHelp() help.Model {
 }
 
 func (m Model) Init() tea.Cmd {
+	return tea.Batch(m.files.Init(), m.warningToast())
+}
+
+func (m Model) warningToast() tea.Cmd {
 	if len(m.warnings) == 0 {
 		return nil
 	}
@@ -173,7 +177,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
-		return m, nil
+		return m, m.files.ResizeCmd()
 
 	case tea.KeyMsg:
 		if cmd, handled := m.globalKey(msg); handled {
@@ -183,8 +187,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.mouse(msg)
 
-	case files.OpenMsg:
-		c := editor.Command(m.cfg.Editor, msg.Path)
+	case editor.OpenMsg:
+		c := editor.Command(m.cfg.Editor, msg.Target)
 		return m, tea.ExecProcess(c, func(err error) tea.Msg {
 			return editorClosedMsg{err: err}
 		})
@@ -194,9 +198,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editorClosedMsg:
 		if msg.err != nil {
-			return m, tea.Batch(git.Refresh, ui.Toast(ui.LevelError, "editor: "+msg.err.Error()))
+			return m, tea.Batch(git.Refresh, files.ReloadCurrent, ui.Toast(ui.LevelError, "editor: "+msg.err.Error()))
 		}
-		return m, git.Refresh
+		return m, tea.Batch(git.Refresh, files.ReloadCurrent)
 
 	case toastExpireMsg:
 		m.toasts = withoutToast(m.toasts, msg.id)
