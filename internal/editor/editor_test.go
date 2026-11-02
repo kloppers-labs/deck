@@ -3,8 +3,11 @@ package editor
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"deck/internal/ui"
 )
 
 // redirectConfigHome points configHome at a temp dir for the duration of a test.
@@ -59,7 +62,7 @@ func TestPrepareDoesNotClobberSettings(t *testing.T) {
 
 func TestCommandMicroForcesTheme(t *testing.T) {
 	redirectConfigHome(t)
-	c := Command("micro", "/tmp/file.go")
+	c := Command("micro", Target{Path: "/tmp/file.go"})
 	if !strings.Contains(strings.Join(c.Args, " "), "-colorscheme dracula") {
 		t.Errorf("micro command missing colorscheme flag: %v", c.Args)
 	}
@@ -79,7 +82,7 @@ func TestCommandMicroForcesTheme(t *testing.T) {
 
 func TestCommandPassesThroughArgs(t *testing.T) {
 	redirectConfigHome(t)
-	c := Command("vim -u NONE", "/tmp/file.go")
+	c := Command("vim -u NONE", Target{Path: "/tmp/file.go"})
 	want := []string{"vim", "-u", "NONE", "/tmp/file.go"}
 	if len(c.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", c.Args, want)
@@ -93,7 +96,7 @@ func TestCommandPassesThroughArgs(t *testing.T) {
 
 func TestCommandMicroRespectsUserColorscheme(t *testing.T) {
 	redirectConfigHome(t)
-	c := Command("micro -colorscheme gruvbox", "/tmp/file.go")
+	c := Command("micro -colorscheme gruvbox", Target{Path: "/tmp/file.go"})
 	joined := strings.Join(c.Args, " ")
 	if strings.Contains(joined, "dracula") {
 		t.Errorf("user-supplied colorscheme should win, got %v", c.Args)
@@ -105,7 +108,7 @@ func TestCommandMicroRespectsUserColorscheme(t *testing.T) {
 
 func TestCommandOtherEditorIsPlain(t *testing.T) {
 	redirectConfigHome(t)
-	c := Command("vim", "/tmp/file.go")
+	c := Command("vim", Target{Path: "/tmp/file.go", Line: 12, Col: 5})
 	if joined := strings.Join(c.Args, " "); strings.Contains(joined, "-colorscheme") {
 		t.Errorf("non-micro editor should not get colorscheme flags: %v", c.Args)
 	}
@@ -113,5 +116,37 @@ func TestCommandOtherEditorIsPlain(t *testing.T) {
 		if strings.HasPrefix(e, "MICRO_CONFIG_HOME=") {
 			t.Errorf("non-micro editor should not get MICRO_CONFIG_HOME: %v", c.Env)
 		}
+	}
+}
+
+func TestCommandMicroOpensAtPosition(t *testing.T) {
+	redirectConfigHome(t)
+	c := Command("micro", Target{Path: "/tmp/file.go", Line: 12, Col: 5, Top: 3})
+	if n := len(c.Args); n < 2 || c.Args[n-1] != "/tmp/file.go" || !slices.Contains(c.Args, "+12:5") {
+		t.Errorf("micro args = %v, want +12:5 before the path", c.Args)
+	}
+	c = Command("micro", Target{Path: "/tmp/file.go", Line: 7})
+	if !slices.Contains(c.Args, "+7") {
+		t.Errorf("a line without a column gives +7, got %v", c.Args)
+	}
+	c = Command("micro", Target{Path: "/tmp/file.go"})
+	for _, a := range c.Args {
+		if strings.HasPrefix(a, "+") {
+			t.Errorf("no position should be passed when Line is unset, got %v", c.Args)
+		}
+	}
+}
+
+func TestCommandOtherEditorGetsNoPosition(t *testing.T) {
+	redirectConfigHome(t)
+	c := Command("nano", Target{Path: "/tmp/file.go", Line: 12, Col: 5})
+	if want := []string{"nano", "/tmp/file.go"}; !slices.Equal(c.Args, want) {
+		t.Errorf("args = %v, want %v until other editors get profiles", c.Args, want)
+	}
+}
+
+func TestOpenMsgRoutesToApp(t *testing.T) {
+	if got := (OpenMsg{}).RouteTo(); got != ui.DestApp {
+		t.Errorf("OpenMsg.RouteTo = %v, want DestApp", got)
 	}
 }

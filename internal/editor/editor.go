@@ -15,8 +15,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+
+	"deck/internal/ui"
 )
+
+// Target is where to open the editor. Line, Col and Top are 1-based and 0
+// means unset; Col is a rune column in the raw line.
+type Target struct {
+	Path           string
+	Line, Col, Top int
+}
+
+// OpenMsg asks the root model to open the editor at Target.
+type OpenMsg struct{ Target Target }
+
+func (OpenMsg) RouteTo() ui.Dest { return ui.DestApp }
 
 //go:embed colorschemes/dracula.micro
 var draculaMicro []byte
@@ -43,28 +58,28 @@ var configHome = func() (string, error) {
 	return filepath.Join(home, ".config", "deck", "micro"), nil
 }
 
-// Command builds the exec.Cmd that launches the configured editor on path. The
-// editor string may carry arguments ("micro -softwrap false", "code -w");
-// they're passed through ahead of the file path. For micro, deck forces its
-// bundled Dracula colorscheme unless the user supplied a -colorscheme of their
-// own; other editors run unchanged.
-func Command(editor, path string) *exec.Cmd {
+// Command launches the configured editor (which may carry arguments) on t. micro
+// also gets +LINE:COL and deck's colorscheme unless the user set one.
+func Command(editor string, t Target) *exec.Cmd {
 	parts := strings.Fields(editor)
 	if len(parts) == 0 {
 		parts = []string{"micro"}
 	}
 	name, args := parts[0], parts[1:]
 	if filepath.Base(name) != "micro" {
-		return exec.Command(name, append(args, path)...)
+		return exec.Command(name, append(args, t.Path)...)
+	}
+	if pos := microPosition(t); pos != "" {
+		args = append(args, pos)
 	}
 	dir, err := Prepare()
 	if err != nil {
-		return exec.Command(name, append(args, path)...)
+		return exec.Command(name, append(args, t.Path)...)
 	}
 	if !slices.Contains(args, "-colorscheme") {
 		args = append(args, "-colorscheme", "dracula")
 	}
-	c := exec.Command(name, append(args, path)...)
+	c := exec.Command(name, append(args, t.Path)...)
 	c.Env = append(os.Environ(),
 		"MICRO_CONFIG_HOME="+dir,
 		"MICRO_TRUECOLOR=1",
@@ -95,4 +110,15 @@ func Prepare() (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+func microPosition(t Target) string {
+	if t.Line <= 0 {
+		return ""
+	}
+	pos := "+" + strconv.Itoa(t.Line)
+	if t.Col > 0 {
+		pos += ":" + strconv.Itoa(t.Col)
+	}
+	return pos
 }
