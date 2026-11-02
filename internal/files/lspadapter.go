@@ -35,6 +35,7 @@ type lspBackend interface {
 	events() <-chan any
 	prestart(ctx context.Context, cwd string) error
 	shutdown(ctx context.Context) error
+	install(ctx context.Context, server string) (string, error)
 }
 
 type managerBackend struct{ m *lsp.Manager }
@@ -58,6 +59,9 @@ func (b managerBackend) prestart(ctx context.Context, cwd string) error {
 	return b.m.Prestart(ctx, cwd)
 }
 func (b managerBackend) shutdown(ctx context.Context) error { return b.m.Shutdown(ctx) }
+func (b managerBackend) install(ctx context.Context, server string) (string, error) {
+	return b.m.Install(ctx, server)
+}
 
 // LSPAdapter presents an *lsp.Manager as the viewer's Navigator, converting
 // between rune columns and the server's position encoding.
@@ -75,7 +79,10 @@ func newAdapter(b lspBackend) *LSPAdapter {
 	return &LSPAdapter{b: b, virtual: map[string][]string{}, enc: map[string]lsp.Encoding{}}
 }
 
-var serverLabels = map[string]string{"csharp": "C#", "go": "Go", "typescript": "TS"}
+var serverLabels = map[string]string{
+	"csharp": "C#", "go": "Go", "typescript": "TS", "python": "Py", "rust": "Rust",
+	"bash": "Sh", "lua": "Lua", "yaml": "YAML", "json": "JSON",
+}
 
 func serverLabel(name string) string {
 	if l, ok := serverLabels[name]; ok {
@@ -94,10 +101,19 @@ var serverStates = map[lsp.State]viewer.ServerState{
 	lsp.StateStopped:  viewer.ServerIdle,
 }
 
-func statusOf(ev lsp.StatusEvent) viewer.ServerStatus {
+func (a *LSPAdapter) language(name string) string {
+	for _, s := range a.b.specs() {
+		if s.Name == name && s.Language != "" {
+			return s.Language
+		}
+	}
+	return serverLabel(name)
+}
+
+func (a *LSPAdapter) statusOf(ev lsp.StatusEvent) viewer.ServerStatus {
 	st := viewer.ServerStatus{
-		Server: ev.Server, Label: serverLabel(ev.Server), State: serverStates[ev.State],
-		Title: ev.Title, Message: ev.Message, Percent: ev.Percent, Since: ev.Since, Hint: ev.Hint,
+		Server: ev.Server, Label: serverLabel(ev.Server), Language: a.language(ev.Server), State: serverStates[ev.State],
+		Title: ev.Title, Message: ev.Message, Percent: ev.Percent, Since: ev.Since, Hint: ev.Hint, Install: ev.Install,
 	}
 	if ev.Root != "" {
 		st.Project = filepath.Base(ev.Root)
@@ -119,13 +135,13 @@ func (a *LSPAdapter) Status(path string) viewer.ServerStatus {
 		if ev.Server != spec.Name {
 			continue
 		}
-		st := statusOf(ev)
+		st := a.statusOf(ev)
 		if ev.Root == "" || virtualOrUnder(path, ev.Root) || found == nil {
 			found = &st
 		}
 	}
 	if found == nil {
-		return viewer.ServerStatus{Server: spec.Name, Label: serverLabel(spec.Name), Ext: ext, State: viewer.ServerIdle, Percent: -1}
+		return viewer.ServerStatus{Server: spec.Name, Label: serverLabel(spec.Name), Language: a.language(spec.Name), Ext: ext, State: viewer.ServerIdle, Percent: -1}
 	}
 	found.Ext = ext
 	return *found
@@ -418,7 +434,7 @@ func (a *LSPAdapter) NextEvent() (any, bool) {
 func (a *LSPAdapter) convertEvent(ev any) (any, bool) {
 	switch ev := ev.(type) {
 	case lsp.StatusEvent:
-		return statusOf(ev), true
+		return a.statusOf(ev), true
 	case lsp.DiagnosticsEvent:
 		path := ev.Path
 		if path == "" {
@@ -471,3 +487,8 @@ func (a *LSPAdapter) Logs() []string {
 func (a *LSPAdapter) Prestart(ctx context.Context, cwd string) error { return a.b.prestart(ctx, cwd) }
 
 func (a *LSPAdapter) Shutdown(ctx context.Context) error { return a.b.shutdown(ctx) }
+
+// Install runs server's install command and lets it start again on success.
+func (a *LSPAdapter) Install(ctx context.Context, server string) (string, error) {
+	return a.b.install(ctx, server)
+}

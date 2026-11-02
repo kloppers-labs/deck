@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"deck/internal/config"
+	"deck/internal/editor"
 	"deck/internal/files"
 	"deck/internal/viewer"
 )
@@ -132,6 +133,10 @@ func TestStatusBarLSPBadges(t *testing.T) {
 			t.Errorf("no percent should show without one: %q", bar)
 		}
 	}
+	installing := viewer.ServerStatus{Label: "Py", State: viewer.ServerStarting, Title: "installing pyright", Percent: -1, Since: m.now().Add(-3 * time.Second)}
+	if got := ansi.Strip(lspBadge(installing, m.now())); !strings.HasPrefix(got, "Py ") || !strings.HasSuffix(got, " installing pyright (3s)") {
+		t.Errorf("install progress badge = %q", got)
+	}
 	if lspBadge(viewer.ServerStatus{Label: "Go", State: viewer.ServerIdle}, time.Now()) != "" {
 		t.Error("an idle server has no badge")
 	}
@@ -163,5 +168,20 @@ func TestLSPConfig(t *testing.T) {
 	}
 	if s := got.Servers["csharp"]; s.Solution != "Foo.sln" || s.Enabled == nil || *s.Enabled {
 		t.Errorf("override = %+v", s)
+	}
+}
+
+func TestResyncMsgSyncsBundleQuietly(t *testing.T) {
+	cfg := config.Default()
+	cfg.MicroBundle = false
+	if _, cmd := New(cfg, nil, nil).Update(editor.ResyncMsg{}); cmd != nil {
+		t.Error("no bundle, nothing to resync")
+	}
+	m := New(config.Default(), nil, nil)
+	if !m.ed.resyncConfig().Quiet {
+		t.Error("a resync must not show issues again")
+	}
+	if _, cmd := m.Update(editor.ResyncMsg{}); cmd == nil {
+		t.Error("ResyncMsg should run a bundle sync")
 	}
 }

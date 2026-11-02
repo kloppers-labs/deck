@@ -20,6 +20,9 @@ func withTimings(t timings) Option { return func(m *Manager) { m.timing = t } }
 
 func withSpecs(specs []ServerSpec) Option { return func(m *Manager) { m.specs = specs } }
 
+// WithInstaller replaces how install commands run; it must return the combined output.
+func WithInstaller(run InstallRunner) Option { return func(m *Manager) { m.installer = run } }
+
 type ServerLog struct {
 	Server string
 	Root   string
@@ -36,28 +39,34 @@ type Manager struct {
 	timing  timings
 	reg     *Registry
 
+	installer InstallRunner
+
 	queue  *eventQueue
 	events chan any
 	done   chan struct{}
 
-	mu      sync.Mutex
-	clients map[string]*Client
-	failed  map[string]StatusEvent
-	closed  bool
+	mu       sync.Mutex
+	clients  map[string]*Client
+	failed   map[string]StatusEvent
+	installs map[int]context.CancelFunc
+	nextID   int
+	closed   bool
 }
 
 func NewManager(cfg Config, opts ...Option) *Manager {
 	m := &Manager{
-		cfg:     cfg,
-		env:     DefaultEnv(),
-		starter: StartProcess,
-		clock:   realClock{},
-		timing:  defaultTimings(),
-		queue:   newEventQueue(eventBuffer),
-		events:  make(chan any),
-		done:    make(chan struct{}),
-		clients: map[string]*Client{},
-		failed:  map[string]StatusEvent{},
+		cfg:       cfg,
+		env:       DefaultEnv(),
+		starter:   StartProcess,
+		clock:     realClock{},
+		timing:    defaultTimings(),
+		queue:     newEventQueue(eventBuffer),
+		events:    make(chan any),
+		done:      make(chan struct{}),
+		clients:   map[string]*Client{},
+		failed:    map[string]StatusEvent{},
+		installs:  map[int]context.CancelFunc{},
+		installer: RunInstall,
 	}
 	for _, o := range opts {
 		o(m)
@@ -165,7 +174,7 @@ func (m *Manager) fail(spec ServerSpec, err error) error {
 	if !errors.As(err, &missing) {
 		return err
 	}
-	ev := StatusEvent{Server: spec.Name, State: StateFailed, Err: err, Hint: missing.Hint, Percent: -1, Since: m.clock.Now()}
+	ev := StatusEvent{Server: spec.Name, State: StateFailed, Err: err, Hint: missing.Hint, Install: missing.Install, Percent: -1, Since: m.clock.Now()}
 	m.mu.Lock()
 	_, seen := m.failed[spec.Name]
 	m.failed[spec.Name] = ev
@@ -254,6 +263,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	m.closed = true
+	for _, cancel := range m.installs {
+		cancel()
+	}
 	m.mu.Unlock()
 	var wg sync.WaitGroup
 	for _, c := range m.sortedClients() {

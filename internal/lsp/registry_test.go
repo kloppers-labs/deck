@@ -97,7 +97,7 @@ func TestMergeOverDefaults(t *testing.T) {
 		"csharp":     {Command: []string{"/opt/csharp-ls", "--loglevel", "info"}, Solution: "Big.sln"},
 		"typescript": {Enabled: &off},
 		"go":         {RootMarkers: []string{"go.mod"}},
-		"rust":       {Command: []string{"rust-analyzer"}, Extensions: []string{".rs"}, RootMarkers: []string{"Cargo.toml"}},
+		"zig":        {Command: []string{"zls"}, Extensions: []string{".zig"}, RootMarkers: []string{"build.zig"}},
 	})
 	byName := map[string]ServerSpec{}
 	var names []string
@@ -105,7 +105,7 @@ func TestMergeOverDefaults(t *testing.T) {
 		byName[s.Name] = s
 		names = append(names, s.Name)
 	}
-	if want := []string{"csharp", "go", "typescript", "rust"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"csharp", "go", "typescript", "python", "rust", "bash", "lua", "yaml", "json", "zig"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("order = %v, want %v", names, want)
 	}
 	cs := byName["csharp"]
@@ -119,8 +119,8 @@ func TestMergeOverDefaults(t *testing.T) {
 	if g := byName["go"]; !reflect.DeepEqual(g.RootMarkers, []string{"go.mod"}) || g.Command[0] != "gopls" {
 		t.Fatalf("go = %+v", g)
 	}
-	if rs := byName["rust"]; !rs.Enabled || rs.Command[0] != "rust-analyzer" || rs.Extensions[0] != ".rs" {
-		t.Fatalf("rust = %+v", rs)
+	if z := byName["zig"]; !z.Enabled || z.Command[0] != "zls" || z.Extensions[0] != ".zig" {
+		t.Fatalf("zig = %+v", z)
 	}
 	if DefaultSpecs()[0].Solution != "" {
 		t.Fatal("MergeSpecs mutated the defaults")

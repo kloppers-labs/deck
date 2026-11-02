@@ -65,3 +65,18 @@ func TestRunSyncLSPOffIgnoresMissingServers(t *testing.T) {
 		t.Errorf("with micro_lsp off missing servers are not an issue: %q", msg.Issues)
 	}
 }
+
+func TestQuietResyncRecordsWithoutNotifying(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "micro")
+	c := bundleConfig(dir)
+	c.Quiet = true
+	if msg := RunSync(c); msg.Err != nil || msg.Notify || len(msg.Issues) == 0 {
+		t.Fatalf("a quiet sync reports issues without notifying: %+v", msg)
+	}
+	if again := RunSync(bundleConfig(dir)); again.Notify {
+		t.Error("issues seen by a quiet sync should not be shown later")
+	}
+	if (ResyncMsg{}).RouteTo() != ui.DestApp {
+		t.Error("ResyncMsg belongs to the app")
+	}
+}

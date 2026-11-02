@@ -62,6 +62,7 @@ type LSP struct {
 	Enabled          bool                 `toml:"enabled"`
 	Prestart         bool                 `toml:"prestart"`
 	RequestTimeoutMS int                  `toml:"request_timeout_ms"`
+	OfferInstall     bool                 `toml:"offer_install"`
 	Servers          map[string]LSPServer `toml:"servers"`
 }
 
@@ -130,6 +131,7 @@ func Default() Config {
 			Enabled:          true,
 			Prestart:         true,
 			RequestTimeoutMS: 8000,
+			OfferInstall:     true,
 		},
 		Git: Git{ConfirmCommit: true},
 	}

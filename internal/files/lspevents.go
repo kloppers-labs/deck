@@ -72,6 +72,9 @@ func (m Model) lspEvent(msg LSPEventMsg) (Model, tea.Cmd) {
 	switch ev := msg.Event.(type) {
 	case viewer.ServerStatus:
 		m.lspStatus = upsertStatus(m.lspStatus, ev)
+		if ev.State == viewer.ServerFailed {
+			m.maybeOffer()
+		}
 		return m, tea.Batch(next, m.startLSPTick())
 	case DiagnosticsEvent:
 		m.viewer.SetDiagnostics(ev.Path, ev.Diagnostics)

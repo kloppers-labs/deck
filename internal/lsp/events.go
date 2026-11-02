@@ -45,6 +45,7 @@ type StatusEvent struct {
 	Percent int
 	Err     error
 	Hint    string
+	Install []string
 	Since   time.Time
 }
 

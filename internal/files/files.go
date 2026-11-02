@@ -110,6 +110,10 @@ type Model struct {
 	lspLog     []string
 	lspTicking bool
 	ws         wsState
+
+	offerInstall bool
+	offer        *installOffer
+	noOffer      map[string]bool
 }
 
 // New builds the Files tab rooted at dir (default: the working directory). Only
@@ -151,6 +155,9 @@ func New(dir string, cfg config.Config) Model {
 		spots:   map[string]viewer.Spot{},
 		history: &viewer.History{},
 		now:     time.Now,
+
+		offerInstall: cfg.LSP.OfferInstall,
+		noOffer:      map[string]bool{},
 	}
 	m.initCmd = tea.Batch(load, m.syncSelection())
 	return m
@@ -335,7 +342,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case viewer.Msg:
 		var cmd tea.Cmd
 		m.viewer, cmd = m.viewer.Update(msg)
+		if _, ok := msg.(viewer.DocLoadedMsg); ok {
+			m.maybeOffer()
+		}
 		return m, cmd
+	case installDoneMsg:
+		return m.installDone(msg)
 	case viewer.GotoMsg:
 		return m.gotoTarget(msg)
 	case viewer.ChooseMsg:
@@ -407,6 +419,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.KeyMsg:
 		m.clearHover()
 		switch {
+		case m.offer != nil:
+			return m.offerKey(msg)
 		case m.pick.Active():
 			return m.pickerKey(msg)
 		case m.prompt.kind != promptNone:
@@ -757,10 +771,10 @@ func (m Model) hoverRow(n *Node, y int) (Model, tea.Cmd) {
 	return m, tea.Tick(hoverDelay, func(time.Time) tea.Msg { return hoverDueMsg{seq: seq} })
 }
 
-// Capturing reports whether typed text belongs to the pane: the picker, an
-// inline prompt, a pending y chord, or a viewer prompt or chord.
+// Capturing reports whether typed text belongs to the pane: the install offer,
+// the picker, an inline prompt, a pending y chord, or a viewer prompt or chord.
 func (m Model) Capturing() bool {
-	return m.pick.Active() || m.prompt.kind != promptNone || m.yPending ||
+	return m.offer != nil || m.pick.Active() || m.prompt.kind != promptNone || m.yPending ||
 		(m.focus == focusViewer && m.viewer.Capturing())
 }
 
@@ -818,6 +832,8 @@ var (
 // HelpBindings returns the key hints for whatever has the keyboard.
 func (m Model) HelpBindings() []key.Binding {
 	switch {
+	case m.offer != nil:
+		return offerBindings
 	case m.pick.Active() && m.pick.ID() == pickGrep:
 		return append(append([]key.Binding{}, picker.Bindings...), grepToggles...)
 	case m.pick.Active():
@@ -883,6 +899,9 @@ func (m Model) View() string {
 	if m.pick.Active() {
 		r := m.pickerRect()
 		body = ui.Overlay(body, m.pick.View(), r.X, r.Y)
+	}
+	if m.offer != nil {
+		body = m.overlayOffer(body)
 	}
 	return ui.Fit(body, m.width, m.height)
 }

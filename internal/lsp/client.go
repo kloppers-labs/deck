@@ -124,7 +124,7 @@ func (c *Client) statusLocked() StatusEvent {
 		Title: c.title, Message: c.message, Percent: c.percent, Err: c.err, Since: c.since,
 	}
 	if c.state == StateFailed {
-		ev.Hint = c.res.Spec.InstallHint
+		ev.Hint = c.res.Spec.InstallHint()
 	}
 	return ev
 }

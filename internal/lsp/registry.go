@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,11 @@ import (
 	"time"
 )
 
+// ServerSpec describes a language server. Install[0] is the installer tool; a
+// failing Probe run against the found binary counts as not installed.
 type ServerSpec struct {
 	Name            string
+	Language        string
 	Command         []string
 	Extensions      []string
 	RootMarkers     []string
@@ -20,10 +24,13 @@ type ServerSpec struct {
 	SolutionFlag    string
 	Solution        string
 	Enabled         bool
-	InstallHint     string
+	Install         []string
+	Probe           []string
 	NeedsTypeScript bool
 	Settings        map[string]any
 }
+
+func (s ServerSpec) InstallHint() string { return strings.Join(s.Install, " ") }
 
 type ServerOverride struct {
 	Command     []string
@@ -48,30 +55,88 @@ func DefaultSpecs() []ServerSpec {
 	return []ServerSpec{
 		{
 			Name:            "csharp",
+			Language:        "C#",
 			Command:         []string{"csharp-ls", "--features", "metadata-uris"},
 			Extensions:      []string{".cs", ".csx"},
 			RootMarkers:     []string{"*.sln", "*.slnx", "*.csproj"},
 			PrestartMarkers: []string{"*.sln", "*.slnx"},
 			SolutionFlag:    "--solution",
 			Enabled:         true,
-			InstallHint:     "dotnet tool install --global csharp-ls",
+			Install:         []string{"dotnet", "tool", "install", "--global", "csharp-ls"},
 		},
 		{
 			Name:        "go",
+			Language:    "Go",
 			Command:     []string{"gopls"},
 			Extensions:  []string{".go"},
 			RootMarkers: []string{"go.work", "go.mod"},
 			Enabled:     true,
-			InstallHint: "go install golang.org/x/tools/gopls@latest",
+			Install:     []string{"go", "install", "golang.org/x/tools/gopls@latest"},
 		},
 		{
 			Name:            "typescript",
+			Language:        "TypeScript",
 			Command:         []string{"typescript-language-server", "--stdio"},
 			Extensions:      []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"},
 			RootMarkers:     []string{"tsconfig.json", "jsconfig.json", "package.json"},
 			Enabled:         true,
-			InstallHint:     "npm install --global typescript-language-server typescript",
+			Install:         []string{"npm", "install", "--global", "typescript-language-server", "typescript"},
 			NeedsTypeScript: true,
+		},
+		{
+			Name:        "python",
+			Language:    "Python",
+			Command:     []string{"pyright-langserver", "--stdio"},
+			Extensions:  []string{".py", ".pyi"},
+			RootMarkers: []string{"pyrightconfig.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", ".git"},
+			Enabled:     true,
+			Install:     []string{"npm", "install", "--global", "pyright"},
+		},
+		{
+			Name:        "rust",
+			Language:    "Rust",
+			Command:     []string{"rust-analyzer"},
+			Extensions:  []string{".rs"},
+			RootMarkers: []string{"Cargo.lock", "Cargo.toml", "rust-project.json"},
+			Enabled:     true,
+			Install:     []string{"rustup", "component", "add", "rust-analyzer"},
+			Probe:       []string{"--version"},
+		},
+		{
+			Name:        "bash",
+			Language:    "Bash",
+			Command:     []string{"bash-language-server", "start"},
+			Extensions:  []string{".sh", ".bash"},
+			RootMarkers: []string{".git"},
+			Enabled:     true,
+			Install:     []string{"npm", "install", "--global", "bash-language-server"},
+		},
+		{
+			Name:        "lua",
+			Language:    "Lua",
+			Command:     []string{"lua-language-server"},
+			Extensions:  []string{".lua"},
+			RootMarkers: []string{".luarc.json", ".luarc.jsonc", ".git"},
+			Enabled:     true,
+			Install:     []string{"brew", "install", "lua-language-server"},
+		},
+		{
+			Name:        "yaml",
+			Language:    "YAML",
+			Command:     []string{"yaml-language-server", "--stdio"},
+			Extensions:  []string{".yaml", ".yml"},
+			RootMarkers: []string{".git"},
+			Enabled:     true,
+			Install:     []string{"npm", "install", "--global", "yaml-language-server"},
+		},
+		{
+			Name:        "json",
+			Language:    "JSON",
+			Command:     []string{"vscode-json-language-server", "--stdio"},
+			Extensions:  []string{".json", ".jsonc"},
+			RootMarkers: []string{".git"},
+			Enabled:     true,
+			Install:     []string{"npm", "install", "--global", "vscode-langservers-extracted"},
 		},
 	}
 }
@@ -132,6 +197,14 @@ func LanguageID(path string) string {
 		return "javascript"
 	case ".jsx":
 		return "javascriptreact"
+	case ".py", ".pyi":
+		return "python"
+	case ".rs":
+		return "rust"
+	case ".sh", ".bash":
+		return "shellscript"
+	case ".yml":
+		return "yaml"
 	}
 	return strings.TrimPrefix(ext, ".")
 }
@@ -141,12 +214,21 @@ type Env struct {
 	Home     string
 	GOPATH   string
 	IsExec   func(string) bool
+	Probe    func(bin string, args []string) error
 }
 
 func DefaultEnv() Env {
 	home, _ := os.UserHomeDir()
 	gopath, _, _ := strings.Cut(os.Getenv("GOPATH"), string(os.PathListSeparator))
-	return Env{LookPath: exec.LookPath, Home: home, GOPATH: gopath, IsExec: isExecutable}
+	return Env{LookPath: exec.LookPath, Home: home, GOPATH: gopath, IsExec: isExecutable, Probe: runProbe}
+}
+
+const probeTimeout = 5 * time.Second
+
+func runProbe(bin string, args []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, bin, args...).Run()
 }
 
 func isExecutable(path string) bool {
@@ -159,9 +241,10 @@ type NoServerError struct{ Ext string }
 func (e *NoServerError) Error() string { return "no language server for " + e.Ext }
 
 type MissingBinaryError struct {
-	Server string
-	Binary string
-	Hint   string
+	Server  string
+	Binary  string
+	Hint    string
+	Install []string
 }
 
 func (e *MissingBinaryError) Error() string { return e.Binary + " not found" }
@@ -181,6 +264,7 @@ type Registry struct {
 
 	mu       sync.Mutex
 	binaries map[string]binaryResult
+	probes   map[string]error
 }
 
 type binaryResult struct {
@@ -195,7 +279,10 @@ func NewRegistry(specs []ServerSpec, env Env) *Registry {
 	if env.IsExec == nil {
 		env.IsExec = isExecutable
 	}
-	return &Registry{specs: specs, env: env, binaries: map[string]binaryResult{}}
+	if env.Probe == nil {
+		env.Probe = runProbe
+	}
+	return &Registry{specs: specs, env: env, binaries: map[string]binaryResult{}, probes: map[string]error{}}
 }
 
 func (r *Registry) Specs() []ServerSpec { return slices.Clone(r.specs) }
@@ -222,6 +309,43 @@ func (r *Registry) LookupBinary(name string) (string, error) {
 	return path, err
 }
 
+// Forget drops cached lookups for name, e.g. after the binary was installed.
+func (r *Registry) Forget(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.binaries, name)
+	delete(r.probes, name)
+}
+
+// LookupServer is LookupBinary for a server command, applying the Probe of the spec that runs it.
+func (r *Registry) LookupServer(name string) (string, error) {
+	for _, s := range r.specs {
+		if len(s.Command) > 0 && s.Command[0] == name {
+			return r.serverBinary(s)
+		}
+	}
+	return r.LookupBinary(name)
+}
+
+func (r *Registry) serverBinary(spec ServerSpec) (string, error) {
+	name := spec.Command[0]
+	bin, err := r.LookupBinary(name)
+	if err != nil || len(spec.Probe) == 0 {
+		return bin, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	perr, ok := r.probes[name]
+	if !ok {
+		perr = r.env.Probe(bin, spec.Probe)
+		r.probes[name] = perr
+	}
+	if perr != nil {
+		return "", exec.ErrNotFound
+	}
+	return bin, nil
+}
+
 func (r *Registry) lookup(name string) (string, error) {
 	if strings.ContainsRune(name, filepath.Separator) {
 		if r.env.IsExec(name) {
@@ -234,7 +358,7 @@ func (r *Registry) lookup(name string) (string, error) {
 	}
 	var dirs []string
 	if r.env.Home != "" {
-		dirs = append(dirs, filepath.Join(r.env.Home, ".dotnet", "tools"), filepath.Join(r.env.Home, "go", "bin"))
+		dirs = append(dirs, filepath.Join(r.env.Home, ".dotnet", "tools"), filepath.Join(r.env.Home, "go", "bin"), filepath.Join(r.env.Home, ".cargo", "bin"))
 	}
 	if r.env.GOPATH != "" {
 		dirs = append(dirs, filepath.Join(r.env.GOPATH, "bin"))
@@ -284,9 +408,9 @@ func (r *Registry) Resolve(path string) (Resolved, error) {
 
 func (r *Registry) resolveIn(spec ServerSpec, dir string) (Resolved, error) {
 	res := Resolved{Spec: spec, Root: dir}
-	bin, err := r.LookupBinary(spec.Command[0])
+	bin, err := r.serverBinary(spec)
 	if err != nil {
-		return res, &MissingBinaryError{Server: spec.Name, Binary: filepath.Base(spec.Command[0]), Hint: spec.InstallHint}
+		return res, &MissingBinaryError{Server: spec.Name, Binary: filepath.Base(spec.Command[0]), Hint: spec.InstallHint(), Install: slices.Clone(spec.Install)}
 	}
 	res.Binary = bin
 	var match string
@@ -303,7 +427,7 @@ func (r *Registry) resolveIn(spec ServerSpec, dir string) (Resolved, error) {
 	if spec.NeedsTypeScript {
 		ts, local := FindTSServer(res.Root, bin)
 		if ts == "" {
-			return res, &MissingBinaryError{Server: spec.Name, Binary: "typescript", Hint: TSInstallHint}
+			return res, &MissingBinaryError{Server: spec.Name, Binary: "typescript", Hint: TSInstallHint, Install: slices.Clone(TSInstall)}
 		}
 		if !local {
 			res.InitOptions = map[string]any{"tsserver": map[string]any{"fallbackPath": ts}}

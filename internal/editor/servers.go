@@ -31,6 +31,12 @@ var microFiletypes = map[string][]string{
 	"csharp":     {"csharp"},
 	"go":         {"go", "gomod"},
 	"typescript": {"typescript", "javascript"},
+	"python":     {"python"},
+	"rust":       {"rust"},
+	"bash":       {"shell"},
+	"lua":        {"lua"},
+	"yaml":       {"yaml"},
+	"json":       {"json"},
 }
 
 var zDeckTemplate = template.Must(template.New("z_deck").Funcs(template.FuncMap{
@@ -63,7 +69,7 @@ func RenderZDeck(specs []lsp.ServerSpec, lookup func(string) (string, error)) ([
 		}
 		bin, err := lookup(s.Command[0])
 		if err != nil {
-			missing = append(missing, MissingServer{Server: s.Name, Binary: filepath.Base(s.Command[0]), Hint: s.InstallHint})
+			missing = append(missing, MissingServer{Server: s.Name, Binary: filepath.Base(s.Command[0]), Hint: s.InstallHint()})
 			continue
 		}
 		args := append([]string(nil), s.Command[1:]...)

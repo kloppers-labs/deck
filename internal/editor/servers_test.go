@@ -27,8 +27,14 @@ func fakeLookup(found map[string]string) func(string) (string, error) {
 func goldenZDeck(t *testing.T) ([]byte, []MissingServer) {
 	t.Helper()
 	return RenderZDeck(lsp.DefaultSpecs(), fakeLookup(map[string]string{
-		"csharp-ls": "/home/dev/.dotnet/tools/csharp-ls",
-		"gopls":     "/home/dev/go/bin/gopls",
+		"csharp-ls":                   "/home/dev/.dotnet/tools/csharp-ls",
+		"gopls":                       "/home/dev/go/bin/gopls",
+		"pyright-langserver":          "/opt/homebrew/bin/pyright-langserver",
+		"rust-analyzer":               "/home/dev/.cargo/bin/rust-analyzer",
+		"bash-language-server":        "/opt/homebrew/bin/bash-language-server",
+		"lua-language-server":         "/opt/homebrew/bin/lua-language-server",
+		"yaml-language-server":        "/opt/homebrew/bin/yaml-language-server",
+		"vscode-json-language-server": "/opt/homebrew/bin/vscode-json-language-server",
 	}))
 }
 

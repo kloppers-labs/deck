@@ -100,12 +100,13 @@ const (
 // ServerStatus describes the language server for a file. Label is the short
 // language name ("C#"), Project the root's base name and Percent -1 when unknown.
 type ServerStatus struct {
-	Server, Label, Ext, Project string
-	State                       ServerState
-	Title, Message              string
-	Percent                     int
-	Since                       time.Time
-	Err, Hint                   string
+	Server, Label, Language, Ext, Project string
+	State                                 ServerState
+	Title, Message                        string
+	Percent                               int
+	Since                                 time.Time
+	Err, Hint                             string
+	Install                               []string
 }
 
 // Usable reports whether requests can be sent; an idle server starts on the first one.

@@ -55,6 +55,19 @@ func (s editorState) syncCmd() tea.Cmd {
 	return editor.SyncCmd(s.bundle)
 }
 
+func (s editorState) resyncConfig() editor.BundleConfig {
+	c := s.bundle
+	c.Quiet = true
+	return c
+}
+
+func (s editorState) resyncCmd() tea.Cmd {
+	if s.microDir == "" {
+		return nil
+	}
+	return editor.SyncCmd(s.resyncConfig())
+}
+
 func (m Model) openEditor(t editor.Target) (tea.Model, tea.Cmd) {
 	var state string
 	if m.ed.microDir != "" {

@@ -82,9 +82,10 @@ micro_bundle = false
 confirm_commit = false
 [lsp]
 prestart = false
+offer_install = false
 `)
 	c, _ := load(path)
-	if c.MicroBundle || c.Git.ConfirmCommit || c.LSP.Prestart {
+	if c.MicroBundle || c.Git.ConfirmCommit || c.LSP.Prestart || c.LSP.OfferInstall {
 		t.Errorf("explicit false values were overwritten by defaults: %+v", c)
 	}
 	if !c.LSP.Enabled {
@@ -246,7 +247,7 @@ func TestNestedDefaults(t *testing.T) {
 	if !reflect.DeepEqual(d.Viewer.GotoClick, []string{"ctrl", "double", "right"}) {
 		t.Errorf("viewer.goto_click = %v", d.Viewer.GotoClick)
 	}
-	if !d.Git.ConfirmCommit || !d.LSP.Enabled || !d.LSP.Prestart || d.LSP.RequestTimeoutMS != 8000 {
+	if !d.Git.ConfirmCommit || !d.LSP.Enabled || !d.LSP.Prestart || !d.LSP.OfferInstall || d.LSP.RequestTimeoutMS != 8000 {
 		t.Errorf("git/lsp defaults wrong: %+v %+v", d.Git, d.LSP)
 	}
 }
@@ -296,5 +297,21 @@ env = { ASPNETCORE_ENVIRONMENT = "Development" }
 		Env: map[string]string{"ASPNETCORE_ENVIRONMENT": "Development"}}
 	if len(c.Tasks) != 1 || !reflect.DeepEqual(c.Tasks[0], want) {
 		t.Errorf("tasks = %+v, want %+v", c.Tasks, want)
+	}
+}
+
+func TestOfferInstallValidated(t *testing.T) {
+	path := writeFile(t, filepath.Join(t.TempDir(), "config.toml"), "[lsp]\noffer_instal = false\n")
+	c, ws := load(path)
+	if !c.LSP.OfferInstall {
+		t.Error("a misspelt key must not change lsp.offer_install")
+	}
+	if len(ws) != 1 || !strings.Contains(ws[0].Message, `did you mean "lsp.offer_install"`) {
+		t.Errorf("warnings = %v, want a suggestion for lsp.offer_install", ws)
+	}
+	bad := writeFile(t, filepath.Join(t.TempDir(), "config.toml"), "[lsp]\noffer_install = \"yes\"\n")
+	c, ws = load(bad)
+	if !c.LSP.OfferInstall || len(ws) != 1 {
+		t.Errorf("a non-boolean should warn and keep the default: %v %v", c.LSP.OfferInstall, ws)
 	}
 }

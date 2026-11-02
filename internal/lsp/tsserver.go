@@ -9,6 +9,8 @@ const tsserverRel = "node_modules/typescript/lib/tsserver.js"
 
 const TSInstallHint = "npm install --global typescript"
 
+var TSInstall = []string{"npm", "install", "--global", "typescript"}
+
 var globalNodeModules = []string{
 	"/opt/homebrew/lib",
 	"/usr/local/lib",

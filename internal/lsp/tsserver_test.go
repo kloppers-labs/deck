@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -55,8 +56,8 @@ func TestResolveTypeScriptWithoutInstallIsMissing(t *testing.T) {
 	r := NewRegistry(specs, Env{IsExec: func(string) bool { return true }})
 	_, err := r.Resolve(filepath.Join(project, "a.ts"))
 	var missing *MissingBinaryError
-	if !errors.As(err, &missing) || missing.Binary != "typescript" || missing.Hint != TSInstallHint {
-		t.Errorf("Resolve error = %v, want missing typescript with hint", err)
+	if !errors.As(err, &missing) || missing.Binary != "typescript" || missing.Hint != TSInstallHint || !reflect.DeepEqual(missing.Install, TSInstall) {
+		t.Errorf("Resolve error = %#v, want missing typescript with hint and install command", err)
 	}
 }
 

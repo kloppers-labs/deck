@@ -62,6 +62,7 @@ type fakeBackend struct {
 	statuses []lsp.StatusEvent
 	evs      chan any
 	asked    []string
+	installs []string
 }
 
 func (b *fakeBackend) clientFor(_ context.Context, path string) (navClient, error) {
@@ -92,6 +93,10 @@ func (b *fakeBackend) logs() []lsp.ServerLog {
 func (b *fakeBackend) events() <-chan any                     { return b.evs }
 func (b *fakeBackend) prestart(context.Context, string) error { return nil }
 func (b *fakeBackend) shutdown(context.Context) error         { return nil }
+func (b *fakeBackend) install(_ context.Context, server string) (string, error) {
+	b.installs = append(b.installs, server)
+	return "ok", nil
+}
 
 func writeFile(t *testing.T, path, text string) {
 	t.Helper()
@@ -243,5 +248,25 @@ func TestAdapterDocumentAndWorkspaceProbe(t *testing.T) {
 	}
 	if logs := a.Logs(); len(logs) != 3 || logs[2] != "b" {
 		t.Errorf("logs = %q", logs)
+	}
+}
+
+func TestAdapterCarriesInstallCommand(t *testing.T) {
+	install := []string{"npm", "install", "--global", "pyright"}
+	b := &fakeBackend{statuses: []lsp.StatusEvent{{
+		Server: "python", State: lsp.StateFailed, Err: errors.New("pyright-langserver not found"),
+		Hint: "npm install --global pyright", Install: install, Percent: -1,
+	}}}
+	a := newAdapter(b)
+	st := a.Status("/x/app.py")
+	if st.State != viewer.ServerFailed || st.Label != "Py" || st.Language != "Python" || strings.Join(st.Install, " ") != "npm install --global pyright" {
+		t.Fatalf("Status = %+v", st)
+	}
+	ev, ok := a.convertEvent(b.statuses[0])
+	if conv, _ := ev.(viewer.ServerStatus); !ok || conv.Language != "Python" || len(conv.Install) != 4 {
+		t.Fatalf("event = %+v", ev)
+	}
+	if out, err := a.Install(context.Background(), "python"); err != nil || out != "ok" || len(b.installs) != 1 || b.installs[0] != "python" {
+		t.Fatalf("Install = %q, %v, backend saw %v", out, err, b.installs)
 	}
 }

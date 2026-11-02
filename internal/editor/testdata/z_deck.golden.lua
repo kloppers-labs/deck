@@ -37,6 +37,48 @@ local deckServers = {
         filetypes = { "go", "gomod" },
         onInitialized = deckPatchClient,
     },
+    {
+        shortName = "python",
+        cmd = "/opt/homebrew/bin/pyright-langserver",
+        args = { "--stdio" },
+        filetypes = { "python" },
+        onInitialized = deckPatchClient,
+    },
+    {
+        shortName = "rust",
+        cmd = "/home/dev/.cargo/bin/rust-analyzer",
+        args = {  },
+        filetypes = { "rust" },
+        onInitialized = deckPatchClient,
+    },
+    {
+        shortName = "bash",
+        cmd = "/opt/homebrew/bin/bash-language-server",
+        args = { "start" },
+        filetypes = { "shell" },
+        onInitialized = deckPatchClient,
+    },
+    {
+        shortName = "lua",
+        cmd = "/opt/homebrew/bin/lua-language-server",
+        args = {  },
+        filetypes = { "lua" },
+        onInitialized = deckPatchClient,
+    },
+    {
+        shortName = "yaml",
+        cmd = "/opt/homebrew/bin/yaml-language-server",
+        args = { "--stdio" },
+        filetypes = { "yaml" },
+        onInitialized = deckPatchClient,
+    },
+    {
+        shortName = "json",
+        cmd = "/opt/homebrew/bin/vscode-json-language-server",
+        args = { "--stdio" },
+        filetypes = { "json" },
+        onInitialized = deckPatchClient,
+    },
 }
 
 local deckOS = import("os")

@@ -267,6 +267,8 @@ func (m Model) routeTo(dest ui.Dest, msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.jump(tab(i))
 				}
 			}
+		case editor.ResyncMsg:
+			return m, m.ed.resyncCmd()
 		}
 	case ui.DestFiles:
 		m.files, cmd = m.files.Update(msg)
