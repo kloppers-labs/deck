@@ -11,21 +11,35 @@ import (
 
 	"deck/internal/app"
 	"deck/internal/config"
+	"deck/internal/files"
+	"deck/internal/lsp"
 )
 
-const stopTimeout = 5 * time.Second
+const (
+	stopTimeout        = 5 * time.Second
+	lspShutdownTimeout = 3 * time.Second
+)
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	cfg, warnings := config.Load()
-	p := tea.NewProgram(app.New(cfg, warnings), programOptions(cfg.Mouse)...)
+	mgr := lsp.NewManager(app.LSPConfig(cfg.LSP))
+	defer app.ShutdownLSP(mgr, lspShutdownTimeout)
+	var nav app.LSP
+	if cfg.LSP.Enabled {
+		nav = files.NewLSPAdapter(mgr)
+	}
+	p := tea.NewProgram(app.New(cfg, warnings, nav), programOptions(cfg.Mouse)...)
 	final, err := p.Run()
 	if m, ok := final.(app.Model); ok {
 		m.StopAll(stopTimeout)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "deck:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func programOptions(mouse string) []tea.ProgramOption {

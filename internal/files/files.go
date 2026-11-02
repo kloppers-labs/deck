@@ -104,6 +104,12 @@ type Model struct {
 	prompt   prompt
 	yPending bool
 	now      func() time.Time
+
+	nav        LSP
+	lspStatus  []viewer.ServerStatus
+	lspLog     []string
+	lspTicking bool
+	ws         wsState
 }
 
 // New builds the Files tab rooted at dir (default: the working directory). Only
@@ -134,6 +140,9 @@ func New(dir string, cfg config.Config) Model {
 			MaxHighlightBytes: cfg.Viewer.MaxHighlightBytes,
 			LineNumbers:       cfg.Viewer.LineNumbers,
 			Wrap:              cfg.Viewer.Wrap,
+			HoverDelay:        time.Duration(cfg.Viewer.HoverDelayMS) * time.Millisecond,
+			GotoClick:         cfg.Viewer.GotoClick,
+			RequestTimeout:    time.Duration(cfg.LSP.RequestTimeoutMS) * time.Millisecond,
 		}),
 		sidebar: sidebar,
 		info:    cfg.Files.InfoPanel,
@@ -253,6 +262,9 @@ func (m *Model) syncSelection() tea.Cmd {
 	if path == m.shown && path != "" {
 		return info
 	}
+	if m.viewer.Loaded() && m.cardPath == "" && m.viewer.Path() != "" && n != nil && !n.IsDir && n.Path != m.viewer.Path() {
+		m.history.Push(m.viewer.Loc())
+	}
 	m.rememberSpot()
 	m.shown, m.cardPath = path, ""
 	var cmd tea.Cmd
@@ -324,6 +336,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewer, cmd = m.viewer.Update(msg)
 		return m, cmd
+	case viewer.GotoMsg:
+		return m.gotoTarget(msg)
+	case viewer.ChooseMsg:
+		return m.choose(msg)
+	case viewer.OutlineMsg:
+		return m.outline(msg)
+	case viewer.JumpedMsg:
+		m.history.Push(msg.From)
+		return m, nil
+	case LSPEventMsg:
+		return m.lspEvent(msg)
+	case lspTickMsg:
+		return m.lspTick()
+	case wsDueMsg:
+		return m.wsDue(msg)
+	case wsResultMsg:
+		return m.wsResult(msg)
 	case picker.PeekMsg, picker.AcceptMsg, picker.CancelMsg, picker.QueryMsg, picker.Msg:
 		return m.picked(msg)
 	case FinderIndexMsg:
@@ -417,6 +446,18 @@ func (m *Model) paneKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return m.openFinder(), true
 	case "ctrl+f":
 		return m.openGrep(), true
+	case "ctrl+t":
+		var cmd tea.Cmd
+		*m, cmd = m.openSymbols()
+		return cmd, true
+	case "ctrl+o", "alt+left":
+		var cmd tea.Cmd
+		*m, cmd = m.back()
+		return cmd, true
+	case "ctrl+]", "alt+right":
+		var cmd tea.Cmd
+		*m, cmd = m.forward()
+		return cmd, true
 	}
 	return nil, false
 }
@@ -508,6 +549,8 @@ func (m Model) treeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.tree.SetSort(m.tree.Sort().Next())
 	case "R":
 		return m.reload()
+	case "L":
+		return m.openLog()
 	case "<":
 		m.setSidebar(m.layout().Tree.W - sidebarStep)
 		return m, m.viewer.ResizeCmd()
@@ -625,6 +668,14 @@ func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		}
 		return m, m.viewer.ResizeCmd()
 	}
+	if msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonBackward:
+			return m.back()
+		case tea.MouseButtonForward:
+			return m.forward()
+		}
+	}
 	press := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
 	if press && l.OnDivider(msg.X, msg.Y) {
 		m.clearHover()
@@ -632,11 +683,14 @@ func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if l.ShowTree && l.Tree.Contains(msg.X, msg.Y) {
-		return m.treeMouse(msg, l)
+		leave := m.viewer.MouseLeave()
+		m, cmd := m.treeMouse(msg, l)
+		return m, tea.Batch(cmd, leave)
 	}
 	m.clearHover()
 	if !l.Viewer.Contains(msg.X, msg.Y) {
-		return m, nil
+		leave := m.viewer.MouseLeave()
+		return m, leave
 	}
 	if press {
 		m.setFocus(focusViewer)
@@ -719,6 +773,8 @@ var (
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 		findBinding,
 		grepBinding,
+		symbolsBinding,
+		key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "lsp log")),
 		key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "new")),
 		key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rename")),
 		key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "trash")),
@@ -734,10 +790,13 @@ var (
 		key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
 		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "http")),
 	}
-	viewerExtras = []key.Binding{
+	symbolsBinding = key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "symbols"))
+	viewerExtras   = []key.Binding{
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		findBinding,
 		grepBinding,
+		symbolsBinding,
+		key.NewBinding(key.WithKeys("ctrl+o", "ctrl+]"), key.WithHelp("ctrl+o/ctrl+]", "back/forward")),
 		key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
 		key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "tree")),
 	}

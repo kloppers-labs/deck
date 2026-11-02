@@ -85,7 +85,7 @@ func TestAltMTogglesMouse(t *testing.T) {
 func TestMouseOffConfigStartsOff(t *testing.T) {
 	cfg := config.Default()
 	cfg.Mouse = "click"
-	m := New(cfg, nil)
+	m := New(cfg, nil, nil)
 	if !m.mouseOn {
 		t.Fatal("click mode should start with the mouse on")
 	}
@@ -95,7 +95,7 @@ func TestMouseOffConfigStartsOff(t *testing.T) {
 		t.Error("click mode should re-enable cell-motion reporting")
 	}
 	cfg.Mouse = "off"
-	if New(cfg, nil).mouseOn {
+	if New(cfg, nil, nil).mouseOn {
 		t.Error("mouse = off should start with the mouse off")
 	}
 }
@@ -164,7 +164,7 @@ func TestConfigWarningsBecomeToasts(t *testing.T) {
 	m := New(config.Default(), []config.Warning{
 		{Path: "/x/config.toml", Message: "bad"},
 		{Path: "/x/config.toml", Message: "worse"},
-	})
+	}, nil)
 	var toast *ui.ToastMsg
 	for _, msg := range collect(m.Init()) {
 		if tm, ok := msg.(ui.ToastMsg); ok {

@@ -3,6 +3,7 @@
 package viewer
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ const (
 	bigJump        = 10
 	cacheSize      = 16
 	bracketScanCap = 10000
+	wheelHoverRows = 3
 )
 
 var clipboardOut io.Writer = os.Stdout
@@ -40,6 +42,10 @@ type Options struct {
 	MaxHighlightBytes int
 	LineNumbers       bool
 	Wrap              bool
+	Navigator         Navigator
+	HoverDelay        time.Duration
+	GotoClick         []string
+	RequestTimeout    time.Duration
 }
 
 // Spot is a cursor line, rune column and top line, all 0-based. A negative Top
@@ -99,6 +105,19 @@ type Model struct {
 	width   int
 	height  int
 	rows    []row
+
+	nav       Navigator
+	reqs      [numNavKinds]int64
+	hoverStop context.CancelFunc
+	hover     hoverState
+	dwellAt   dwellState
+	symbols   []Symbol
+	symGen    int
+	outline   bool
+	diags     *diagStore
+	hints     map[string]bool
+	flash     string
+	clicks    ui.ClickTracker
 }
 
 func New(o Options) Model {
@@ -118,6 +137,9 @@ func New(o Options) Model {
 		numbers: o.LineNumbers,
 		wrap:    o.Wrap,
 		now:     time.Now,
+		nav:     o.Navigator,
+		diags:   &diagStore{byPath: map[string][]Diagnostic{}},
+		hints:   map[string]bool{},
 	}
 }
 
@@ -138,8 +160,18 @@ func (m Model) Open(path string, at *Spot) (Model, tea.Cmd) {
 	m.cur, m.want, m.top, m.left = Pos{}, 0, 0, 0
 	m.prompt, m.chord = prompt{}, Chord{}
 	m.search.matches, m.search.idx = nil, 0
+	m.resetNav()
 	m.relayout()
 	return m, LoadCmd(path, m.gen, m.loadOptions())
+}
+
+func (m *Model) resetNav() {
+	m.closeHover()
+	m.dwellAt = dwellState{}
+	m.symbols, m.symGen, m.outline = nil, 0, false
+	for k := range m.reqs {
+		m.reqs[k] = 0
+	}
 }
 
 // Reload reopens the current file where the cursor is now.
@@ -148,6 +180,9 @@ func (m Model) Reload() (Model, tea.Cmd) {
 		return m, nil
 	}
 	s := m.Spot()
+	if IsVirtual(m.path) {
+		return m.OpenURI(m.path, &s)
+	}
 	return m.Open(m.path, &s)
 }
 
@@ -157,6 +192,7 @@ func (m Model) ShowNote(text string) Model {
 	m.path, m.doc, m.md, m.err, m.pending = "", nil, nil, nil, nil
 	m.note = text
 	m.prompt, m.chord = prompt{}, Chord{}
+	m.resetNav()
 	m.relayout()
 	return m
 }
@@ -168,6 +204,25 @@ func (m Model) Loc() Loc { return Loc{Path: m.path, Line: m.cur.Line, Col: m.cur
 func (m Model) Spot() Spot { return Spot{Line: m.cur.Line, Col: m.cur.Col, Top: m.top} }
 
 func (m Model) Loaded() bool { return m.doc != nil }
+
+// RawMarkdown reports whether markdown shows as source rather than rendered.
+func (m Model) RawMarkdown() bool { return m.rawMD }
+
+// SetRawMarkdown switches markdown between source and rendered, from the top.
+func (m Model) SetRawMarkdown(raw bool) Model {
+	if m.rawMD == raw {
+		return m
+	}
+	m.rawMD = raw
+	m.cur, m.want, m.top, m.left = Pos{}, 0, 0, 0
+	m.search.matches = nil
+	if m.search.query != "" && m.doc != nil {
+		m.runSearch()
+	}
+	m.closeHover()
+	m.relayout()
+	return m
+}
 
 // Highlighted reports whether every line of the current document is styled.
 func (m Model) Highlighted() bool {
@@ -195,7 +250,7 @@ func (m *Model) SetFocused(f bool) { m.focused = f }
 func (m Model) Capturing() bool { return m.prompt.kind != 0 || m.chord.Pending() }
 
 // WantsEsc reports whether esc has something to close in the viewer.
-func (m Model) WantsEsc() bool { return m.Capturing() || m.search.query != "" }
+func (m Model) WantsEsc() bool { return m.Capturing() || m.search.query != "" || m.hover.open }
 
 func (m *Model) SetSize(w, h int) {
 	m.width, m.height = max(w, 0), max(h, 0)
@@ -387,10 +442,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.cur = m.clampPos(m.cur)
 			m.ensureVisible()
 		}
+	case LocationsMsg:
+		cmd = m.located(msg)
+	case HoverMsg:
+		cmd = m.gotHover(msg)
+	case SymbolsMsg:
+		cmd = m.gotSymbols(msg)
+	case hoverDwellMsg:
+		cmd = m.dwellDue(msg)
+	case hoverLeaveMsg:
+		m.leaveDue(msg)
 	case tea.KeyMsg:
 		cmd = m.key(msg)
 	case tea.MouseMsg:
-		m.mouse(msg)
+		cmd = m.mouse(msg)
 	}
 	m.relayout()
 	return m, tea.Batch(cmd, m.ensureContent())
@@ -418,7 +483,7 @@ func (m *Model) loaded(msg DocLoadedMsg) tea.Cmd {
 		}
 		m.ensureVisible()
 	}
-	return nil
+	return m.requestSymbols()
 }
 
 func (m *Model) highlighted(msg DocHighlightedMsg) tea.Cmd {
@@ -483,13 +548,27 @@ func (m Model) ensureContent() tea.Cmd {
 }
 
 func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
+	m.flash = ""
+	k := msg.String()
+	if m.hover.open {
+		switch k {
+		case "ctrl+j":
+			m.scrollHover(1)
+			return nil
+		case "ctrl+k":
+			m.scrollHover(-1)
+			return nil
+		case "esc":
+			m.closeHover()
+			return nil
+		}
+	}
+	m.closeHover()
 	if m.prompt.kind != 0 {
 		return m.promptKey(msg)
 	}
-	k := msg.String()
 	if action, consumed := m.chord.Feed(k); consumed {
-		m.chordAction(action)
-		return nil
+		return m.chordAction(action)
 	}
 	if m.doc == nil {
 		return nil
@@ -520,7 +599,9 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "$", "end":
 		m.moveTo(Pos{m.cur.Line, utf8.RuneCountInString(raw[m.cur.Line])})
 	case "G":
+		from := m.Loc()
 		m.moveLine(len(raw) - 1)
+		return m.jumpedFrom(from)
 	case "H", "M", "L":
 		m.screenLine(k)
 	case "%":
@@ -538,9 +619,16 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "J":
 		m.page(bigJump)
 	case "K":
+		if m.nav != nil && m.Status().State != ServerNone && m.lspDoc() {
+			return m.requestHover(m.cur, false)
+		}
 		m.page(-bigJump)
+	case "o":
+		return m.openOutline()
+	case "f12":
+		return m.navigate(NavDefinition, m.cur, false)
 	case ":":
-		m.prompt = prompt{kind: ':'}
+		m.prompt = prompt{kind: ':', origin: m.cur}
 	case "/":
 		m.prompt = prompt{kind: '/', origin: m.cur, originTop: m.top, regex: m.search.regex}
 	case "n":
@@ -567,25 +655,36 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 		m.ensureVisible()
 	case "m":
 		if m.doc.Markdown {
-			m.rawMD = !m.rawMD
-			m.cur, m.want, m.top, m.left = Pos{}, 0, 0, 0
-			m.search.matches = nil
-			if m.search.query != "" {
-				m.runSearch()
-			}
+			*m = m.SetRawMarkdown(!m.rawMD)
 		}
 	}
 	return nil
 }
 
-func (m *Model) chordAction(action string) {
+func (m *Model) chordAction(action string) tea.Cmd {
 	raw, _ := m.lines()
 	if len(raw) == 0 {
-		return
+		return nil
 	}
 	switch action {
 	case "gg":
+		from := m.Loc()
 		m.moveLine(0)
+		return m.jumpedFrom(from)
+	case "gd":
+		return m.navigate(NavDefinition, m.cur, false)
+	case "gy":
+		return m.navigate(NavTypeDefinition, m.cur, false)
+	case "gi":
+		return m.navigate(NavImplementation, m.cur, false)
+	case "gr":
+		return m.navigate(NavReferences, m.cur, false)
+	case "]d", "[d":
+		if p, ok := NextDiagnostic(m.diagnostics(), m.cur, action == "]d"); ok {
+			m.moveTo(p)
+		} else {
+			m.flash = "no diagnostics"
+		}
 	case "zz":
 		m.center()
 	case "zt":
@@ -593,6 +692,7 @@ func (m *Model) chordAction(action string) {
 	case "zb":
 		m.setTop(m.cur.Line - m.bodyHeight() + 1)
 	}
+	return nil
 }
 
 func (m *Model) screenLine(k string) {
@@ -715,8 +815,7 @@ func (m *Model) promptKey(msg tea.KeyMsg) tea.Cmd {
 		m.prompt = prompt{}
 		return nil
 	case tea.KeyEnter:
-		m.acceptPrompt()
-		return nil
+		return m.acceptPrompt()
 	case tea.KeyBackspace:
 		if p.text == "" {
 			return m.promptKey(tea.KeyMsg{Type: tea.KeyEsc})
@@ -750,19 +849,22 @@ func (m *Model) promptKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) acceptPrompt() {
+func (m *Model) acceptPrompt() tea.Cmd {
 	p := m.prompt
 	m.prompt = prompt{}
 	switch p.kind {
 	case ':':
 		if pos, ok := parseGoto(p.text); ok {
+			from := Loc{Path: m.path, Line: p.origin.Line, Col: p.origin.Col}
 			m.jumpTo(pos)
+			return m.jumpedFrom(from)
 		}
 	case '/':
 		if p.text == "" {
 			m.search = searchState{regex: m.search.regex}
 		}
 	}
+	return nil
 }
 
 func parseGoto(s string) (Pos, bool) {
@@ -833,7 +935,11 @@ func (m Model) relPath() string {
 	return m.path
 }
 
-func (m Model) openEditor() tea.Cmd {
+func (m *Model) openEditor() tea.Cmd {
+	if IsVirtual(m.path) {
+		m.flash = "read-only document"
+		return nil
+	}
 	t := editor.Target{Path: m.path}
 	if !m.showingMD() {
 		t.Line, t.Col, t.Top = m.cur.Line+1, m.cur.Col+1, m.top+1
@@ -850,12 +956,23 @@ func copyCmd(text, label string) tea.Cmd {
 	}
 }
 
-func (m *Model) mouse(msg tea.MouseMsg) {
+func (m *Model) mouse(msg tea.MouseMsg) tea.Cmd {
 	if m.doc == nil {
-		return
+		return nil
+	}
+	if r, ok := m.hoverRect(); ok && r.Contains(msg.X, msg.Y) {
+		switch msg.Button {
+		case tea.MouseButtonWheelDown:
+			m.scrollHover(wheelHoverRows)
+		case tea.MouseButtonWheelUp:
+			m.scrollHover(-wheelHoverRows)
+		}
+		m.hover.leave = 0
+		return nil
 	}
 	ev := tea.MouseEvent(msg)
 	if ev.IsWheel() {
+		m.closeHover()
 		n := m.wheelLines()
 		switch {
 		case msg.Button == tea.MouseButtonWheelLeft, msg.Shift && msg.Button == tea.MouseButtonWheelUp:
@@ -867,21 +984,59 @@ func (m *Model) mouse(msg tea.MouseMsg) {
 		case msg.Button == tea.MouseButtonWheelUp:
 			m.scrollBy(-n)
 		}
-		return
+		return nil
 	}
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return
+	if msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonNone {
+		return m.dwell(msg.X, msg.Y)
+	}
+	if msg.Action != tea.MouseActionPress || (msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight) {
+		return nil
 	}
 	y := msg.Y - 1
 	if y < 0 || y >= m.bodyHeight() {
-		return
+		return nil
 	}
+	m.closeHover()
+	m.flash = ""
 	raw, _ := m.lines()
-	if p, ok := ScreenToDoc(raw, m.layout(), msg.X, y); ok {
+	l := m.layout()
+	p, onText := ScreenToDoc(raw, l, msg.X, y)
+	onText = onText && msg.X >= l.Gutter
+	if msg.Button == tea.MouseButtonRight {
+		if !onText || !m.gotoOn("right") {
+			return nil
+		}
 		m.moveTo(p)
-	} else if len(raw) > 0 {
+		return m.navigate(NavDefinition, m.cur, true)
+	}
+	presses := m.clicks.Press(msg.X, msg.Y, m.now())
+	switch {
+	case onText:
+		m.moveTo(p)
+	case len(raw) > 0:
 		m.moveLine(len(raw) - 1)
 	}
+	switch {
+	case !onText:
+		return nil
+	case msg.Alt:
+		return m.navigate(NavReferences, m.cur, true)
+	case msg.Ctrl && m.gotoOn("ctrl"), ui.IsDouble(presses) && m.gotoOn("double"):
+		return m.navigate(NavDefinition, m.cur, true)
+	}
+	return nil
+}
+
+func (m Model) gotoOn(gesture string) bool {
+	if m.opts.GotoClick == nil {
+		return true
+	}
+	for _, g := range m.opts.GotoClick {
+		if strings.EqualFold(g, gesture) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) wheelLines() int {
@@ -912,5 +1067,11 @@ func (m Model) HelpBindings() []key.Binding {
 		key.NewBinding(key.WithKeys("w", "b"), key.WithHelp("w/b", "word")),
 		key.NewBinding(key.WithKeys("z"), key.WithHelp("zz/zt/zb", "centre/top/bottom")),
 		key.NewBinding(key.WithKeys("%"), key.WithHelp("%", "matching bracket")),
+		key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "hover")),
+		key.NewBinding(key.WithKeys("g", "f12"), key.WithHelp("gd/F12", "definition")),
+		key.NewBinding(key.WithKeys("g"), key.WithHelp("gi/gy", "implementation/type")),
+		key.NewBinding(key.WithKeys("g"), key.WithHelp("gr", "references")),
+		key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "outline")),
+		key.NewBinding(key.WithKeys("]", "["), key.WithHelp("]d/[d", "next/prev diagnostic")),
 	}
 }

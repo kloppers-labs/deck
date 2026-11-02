@@ -76,7 +76,7 @@ func TestEditorCloseFollowsWhereMicroEnded(t *testing.T) {
 func TestEditorCloseOriginMode(t *testing.T) {
 	cfg := config.Default()
 	cfg.EditorReturn = "origin"
-	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30})
+	m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30})
 	origin := editor.Target{Path: filepath.Join(m.ed.cwd, "app.go"), Line: 3}
 	msgs := closedCmds(t, m, editorClosedMsg{origin: origin, state: editor.State{Path: filepath.Join(m.ed.cwd, "help.go"), Line: 9, Col: 1, Top: 1}, ok: true})
 	if got := revealOf(msgs); got == nil || *got != origin {
@@ -124,7 +124,7 @@ func TestDetachRaisesToast(t *testing.T) {
 func TestOpenMissingEditorToasts(t *testing.T) {
 	cfg := config.Default()
 	cfg.Editor = "deck-no-such-editor-xyz"
-	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30})
+	m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30})
 	_, cmd := m.Update(editor.OpenMsg{Target: editor.Target{Path: appGo()}})
 	msgs := collect(cmd)
 	if len(msgs) != 1 {
@@ -173,7 +173,7 @@ func TestInitSyncsMicroBundle(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.MicroBundle = false
-	for _, msg := range collect(New(cfg, nil).Init()) {
+	for _, msg := range collect(New(cfg, nil, nil).Init()) {
 		if _, ok := msg.(editor.SyncedMsg); ok {
 			t.Error("micro_bundle = false should skip the sync")
 		}

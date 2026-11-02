@@ -30,7 +30,7 @@ func withRunningTask(t *testing.T, marker string) Model {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Tasks = []config.Task{{Name: "api", Cmd: marker}}
-	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"), keyMsg("enter"), keyMsg("1"))
+	m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"), keyMsg("enter"), keyMsg("1"))
 	t.Cleanup(func() { m.StopAll(5 * time.Second) })
 	if m.run.RunningCount() != 1 {
 		t.Fatal("the task should be running")
@@ -142,7 +142,7 @@ func startTask(t *testing.T, task config.Task) Model {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Tasks = []config.Task{task}
-	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"))
+	m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"))
 	next, cmd := m.Update(keyMsg("enter"))
 	m = update(t, next.(Model), keyMsg("1"))
 	return pump(t, m, cmd, func(m Model) bool { return idle(m) && len(m.toasts) > 0 })
@@ -189,7 +189,7 @@ func TestFocusTabMsgSwitches(t *testing.T) {
 func TestInitDetectsTasks(t *testing.T) {
 	t.Chdir(t.TempDir())
 	var found bool
-	for _, msg := range collect(New(config.Default(), nil).Init()) {
+	for _, msg := range collect(New(config.Default(), nil, nil).Init()) {
 		if _, ok := msg.(runner.DetectedMsg); ok {
 			found = true
 		}

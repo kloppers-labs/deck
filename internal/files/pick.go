@@ -20,10 +20,11 @@ const (
 // pickOrigin is where the viewer stood when a picker opened, so esc can put it
 // back after peeks and enter can record the jump.
 type pickOrigin struct {
-	loc    viewer.Loc
-	spot   viewer.Spot
-	card   bool
-	peeked bool
+	loc      viewer.Loc
+	spot     viewer.Spot
+	card     bool
+	peeked   bool
+	markdown bool
 }
 
 func (m *Model) openPicker(o picker.Options) {
@@ -70,11 +71,21 @@ func (m Model) peek(path string, spot *viewer.Spot) (Model, tea.Cmd) {
 	}
 	m.origin.peeked = true
 	var cmd tea.Cmd
-	m.viewer, cmd = m.viewer.Open(path, spot)
+	switch {
+	case path == m.viewer.Path() && m.viewer.Loaded() && spot != nil:
+		m.viewer = m.viewer.JumpTo(*spot)
+	case viewer.IsVirtual(path):
+		m.viewer, cmd = m.viewer.OpenURI(path, spot)
+	default:
+		m.viewer, cmd = m.viewer.Open(path, spot)
+	}
 	return m, cmd
 }
 
 func (m Model) restoreOrigin() (Model, tea.Cmd) {
+	if m.origin.markdown {
+		m.viewer = m.viewer.SetRawMarkdown(false)
+	}
 	if !m.origin.peeked {
 		return m, nil
 	}
@@ -85,8 +96,16 @@ func (m Model) restoreOrigin() (Model, tea.Cmd) {
 		return m, m.syncSelection()
 	}
 	spot := m.origin.spot
+	if m.origin.loc.Path == m.viewer.Path() && m.viewer.Loaded() {
+		m.viewer = m.viewer.JumpTo(spot)
+		return m, nil
+	}
 	var cmd tea.Cmd
-	m.viewer, cmd = m.viewer.Open(m.origin.loc.Path, &spot)
+	if viewer.IsVirtual(m.origin.loc.Path) {
+		m.viewer, cmd = m.viewer.OpenURI(m.origin.loc.Path, &spot)
+	} else {
+		m.viewer, cmd = m.viewer.Open(m.origin.loc.Path, &spot)
+	}
 	return m, cmd
 }
 
@@ -97,7 +116,10 @@ func (m Model) jump(path string, spot *viewer.Spot) (Model, tea.Cmd) {
 		m.history.Push(o.loc)
 	}
 	m.origin = pickOrigin{}
-	return m.show(path, spot)
+	if path == "" {
+		return m, nil
+	}
+	return m.openAt(path, spot)
 }
 
 func (m Model) show(path string, spot *viewer.Spot) (Model, tea.Cmd) {
@@ -178,10 +200,16 @@ func (m Model) picked(msg tea.Msg) (Model, tea.Cmd) {
 		m.stopGrep()
 		return m.restoreOrigin()
 	case picker.QueryMsg:
-		if msg.ID != pickGrep || !m.pick.Active() || m.pick.ID() != pickGrep {
+		if !m.pick.Active() || msg.ID != m.pick.ID() {
 			return m, nil
 		}
-		return m.grepQuery()
+		switch msg.ID {
+		case pickGrep:
+			return m.grepQuery()
+		case pickSymbols:
+			return m.wsQuery(msg.Query)
+		}
+		return m, nil
 	case picker.Msg:
 		var cmd tea.Cmd
 		m.pick, cmd = m.pick.Update(msg)

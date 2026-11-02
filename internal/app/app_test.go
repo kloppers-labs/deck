@@ -59,7 +59,7 @@ func isQuit(cmd tea.Cmd) bool {
 	return ok
 }
 
-func newModel() Model { return New(config.Default(), nil) }
+func newModel() Model { return New(config.Default(), nil, nil) }
 
 func TestQuitOnFilesTab(t *testing.T) {
 	m := newModel()
@@ -236,7 +236,7 @@ func TestAsyncRoutedWhileOtherTabActive(t *testing.T) {
 func TestRunnerOutputRoutedWhileOtherTabActive(t *testing.T) {
 	cfg := config.Default()
 	cfg.Tasks = []config.Task{{Name: "echo", Cmd: "echo routed-output"}}
-	m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"))
+	m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30}, keyMsg("3"))
 	next, cmd := m.Update(keyMsg("enter"))
 	m = next.(Model)
 	var out tea.Msg

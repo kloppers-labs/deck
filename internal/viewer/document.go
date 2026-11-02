@@ -25,6 +25,7 @@ const (
 // is tab-expanded and sanitised, and Styled is per-line highlighting ("" until styled).
 type Document struct {
 	Path      string
+	Title     string
 	Raw       []string
 	Plain     []string
 	Styled    []string

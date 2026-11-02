@@ -2,6 +2,7 @@ package viewer
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,13 +52,18 @@ func (m Model) View() string {
 	if m.height > 1 {
 		out = append(out, ui.Fit(m.footer(), m.width, 1))
 	}
-	return strings.Join(out[:m.height], "\n")
+	view := strings.Join(out[:m.height], "\n")
+	if r, ok := m.hoverRect(); ok {
+		view = ui.Overlay(view, m.hoverView(r), r.X, r.Y)
+	}
+	return view
 }
 
 func (m Model) renderRows(out []string) []string {
 	raw, plain := m.lines()
 	l := m.layout()
 	numW := max(l.Gutter-3, 0)
+	diags := m.diagnostics()
 	var b strings.Builder
 	for _, r := range m.rows {
 		b.Reset()
@@ -67,14 +73,18 @@ func (m Model) renderRows(out []string) []string {
 				sgr = gutterCurSGR
 			}
 			b.WriteString(sgr)
+			marker := " "
 			if r.sub == 0 {
 				num := strconv.Itoa(r.line + 1)
 				b.WriteString(strings.Repeat(" ", max(numW-len(num), 0)))
 				b.WriteString(num)
+				if d, ok := lineDiagnostic(diags, r.line); ok {
+					marker = diagSGR[Severity(d.Severity.rank())] + d.Severity.glyph() + sgrReset
+				}
 			} else {
 				b.WriteString(strings.Repeat(" ", numW))
 			}
-			b.WriteString("   " + sgrReset)
+			b.WriteString(" " + sgrReset + marker + " ")
 		}
 		start := m.left
 		if l.Wrap {
@@ -122,6 +132,17 @@ func (m Model) rowSpans(raw []string, line, start int, l Layout) []Span {
 		}
 		spans = append(spans, Span{Start: max(mt.Start-start, 0), End: min(mt.End, end) - start, SGR: sgr})
 	}
+	if h := m.hover.span; m.hover.open && line == h.Start.Line {
+		from := DispCol(raw[line], h.Start.Col, l.TabWidth) - start
+		to := DispCol(raw[line], h.End.Col, l.TabWidth) - start
+		if to > 0 && from < l.TextW {
+			sgr := underlineSGR
+			if m.focused && line == m.cur.Line {
+				sgr = cursorLineSGR + underlineSGR
+			}
+			spans = append(spans, Span{Start: max(from, 0), End: min(to, l.TextW), SGR: sgr})
+		}
+	}
 	if m.focused && line == m.cur.Line {
 		dc := DispCol(raw[line], m.cur.Col, l.TabWidth)
 		if dc >= start && dc < end {
@@ -148,6 +169,12 @@ func (m Model) header() string {
 		room -= ansi.StringWidth(banner) + 1
 	}
 	path := m.relPath()
+	if d := m.doc; d != nil && d.Title != "" {
+		path = d.Title
+	}
+	if crumbs := m.breadcrumb(); len(crumbs) > 0 {
+		path = filepath.Base(path) + " › " + strings.Join(crumbs, " › ")
+	}
 	if over := ansi.StringWidth(path) - room; over > 0 {
 		path = ansi.TruncateLeft(path, over+1, "…")
 	}
@@ -174,8 +201,14 @@ func (m Model) footer() string {
 		}
 	case m.chord.Pending():
 		left = m.chord.Prefix() + "…"
+	case m.flash != "":
+		left = warnStyle.Render(m.flash)
 	case m.search.query != "":
 		left = "/" + m.search.query + "  " + m.searchCount()
+	default:
+		if d, ok := lineDiagnostic(m.diagnostics(), m.cur.Line); ok && m.doc != nil {
+			left = diagSGR[Severity(d.Severity.rank())] + d.summary() + sgrReset
+		}
 	}
 	var right string
 	if raw, _ := m.lines(); m.doc != nil && len(raw) > 0 {
@@ -185,6 +218,9 @@ func (m Model) footer() string {
 			right = "rendered · m raw · " + right
 		} else if m.doc.Lang != "" && m.doc.Lang != "plaintext" {
 			right = m.doc.Lang + " · " + right
+		}
+		if badge := m.lspBadge(); badge != "" {
+			right = badge + " · " + right
 		}
 	}
 	right = ui.Muted.Render(right)
@@ -224,4 +260,22 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d %cB", int64(v), "KMGTPE"[exp])
 	}
 	return fmt.Sprintf("%.1f %cB", v, "KMGTPE"[exp])
+}
+
+func (m Model) lspBadge() string {
+	if m.nav == nil || m.path == "" || m.doc == nil || m.doc.virtual {
+		return ""
+	}
+	st := m.nav.Status(m.path)
+	switch st.State {
+	case ServerNone:
+		return ""
+	case ServerReady:
+		return st.Label + " ●"
+	case ServerExited, ServerFailed:
+		return st.Label + " ✗"
+	case ServerIdle:
+		return st.Label + " ○"
+	}
+	return st.Label + " …"
 }

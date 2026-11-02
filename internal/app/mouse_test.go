@@ -53,7 +53,7 @@ func TestMouseYTranslated(t *testing.T) {
 		}
 	}
 	t.Chdir(dir)
-	m := update(t, New(config.Default(), nil), tea.WindowSizeMsg{Width: 120, Height: 30})
+	m := update(t, New(config.Default(), nil, nil), tea.WindowSizeMsg{Width: 120, Height: 30})
 	m = update(t, m, press(2, tabBarHeight+files.ListTop+1))
 	if got := filepath.Base(m.files.SelectedPath()); got != "b.go" {
 		t.Errorf("clicking the second row selected %q, want b.go: the click's Y was not translated", got)

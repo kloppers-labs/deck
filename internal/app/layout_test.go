@@ -50,7 +50,7 @@ func TestFrameFitsTerminal(t *testing.T) {
 		for i, name := range tabNames {
 			for _, help := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%dx%d/help=%v", name, w, h, help), func(t *testing.T) {
-					m := update(t, New(cfg, nil), tea.WindowSizeMsg{Width: w, Height: h},
+					m := update(t, New(cfg, nil, nil), tea.WindowSizeMsg{Width: w, Height: h},
 						keyMsg(fmt.Sprintf("alt+%d", i+1)))
 					if m.active != tab(i) {
 						t.Fatalf("active = %d, want %d", m.active, i)

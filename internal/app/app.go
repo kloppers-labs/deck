@@ -83,16 +83,22 @@ type Model struct {
 	lastMotion *cell
 	width      int
 	height     int
+	lsp        LSP
+	now        func() time.Time
 }
 
 // New builds the root model from loaded config. warnings are shown as a toast
-// once the program starts.
-func New(cfg config.Config, warnings []config.Warning) Model {
+// once the program starts; a nil nav runs without language servers.
+func New(cfg config.Config, warnings []config.Warning, nav LSP) Model {
+	var fl files.LSP
+	if nav != nil {
+		fl = nav
+	}
 	return Model{
 		cfg:      cfg,
 		warnings: warnings,
 		project:  projectName(),
-		files:    files.New("", cfg).WithBadges(gitBadges),
+		files:    files.New("", cfg).WithBadges(gitBadges).WithLSP(fl),
 		git: git.NewPane(git.Options{
 			Theme:         cfg.Theme,
 			CommitAI:      aicommit.Available(cfg.AIBackend),
@@ -104,6 +110,8 @@ func New(cfg config.Config, warnings []config.Warning) Model {
 		help:    newHelpState(),
 		mouseOn: cfg.Mouse != "off",
 		ed:      newEditorState(cfg),
+		lsp:     nav,
+		now:     time.Now,
 	}
 }
 
@@ -128,7 +136,8 @@ func newKeyHelp() help.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init(), m.ed.syncCmd())
+	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init(), m.ed.syncCmd(),
+		files.ListenLSP(m.files.LSP()), prestartCmd(m.lsp, m.ed.cwd))
 }
 
 func (m Model) warningToast() tea.Cmd {
@@ -470,7 +479,7 @@ func (m Model) statusBar() string {
 		project = filepath.Base(top)
 	}
 	left := statusLeft(project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
-	var right []string
+	right := lspBadges(m.files.LSPStatus(), m.now())
 	if n := len(m.toasts); n > 0 {
 		right = append(right, m.toasts[n-1].msg.Render())
 	}
