@@ -305,6 +305,18 @@ func TestRevealMsgSelectsAndGoes(t *testing.T) {
 	}
 }
 
+func TestRevealMsgRereadsExpandedDirectories(t *testing.T) {
+	dir := fixture(t, map[string]int{"sub/a.go": 5, "z.go": 1})
+	m := started(t, dir, 100, 30)
+	m, _ = press(t, m, "l")
+	touch(t, dir, "made-in-editor.go")
+	m, cmd := m.Update(RevealMsg{Target: editor.Target{Path: filepath.Join(dir, "sub", "a.go"), Line: 2}})
+	m, _ = settle(t, m, cmd)
+	if got := rowNames(m.tree.Rows()); strings.Join(got, ",") != "sub,  a.go,made-in-editor.go,z.go" {
+		t.Errorf("returning from the editor re-reads the tree: %v", got)
+	}
+}
+
 func TestReloadKeepsPositionAndExpansion(t *testing.T) {
 	dir := fixture(t, map[string]int{"sub/a.go": 50, "z.go": 1})
 	m := started(t, dir, 100, 30)

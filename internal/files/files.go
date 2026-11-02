@@ -517,6 +517,7 @@ func (m Model) reveal(t editor.Target) (Model, tea.Cmd) {
 	if t.Path == "" {
 		return m, nil
 	}
+	m.tree.Reload()
 	m.tree.Reveal(t.Path)
 	m.rememberSpot()
 	m.shown, m.cardPath = t.Path, ""
@@ -524,7 +525,7 @@ func (m Model) reveal(t editor.Target) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.viewer, cmd = m.viewer.Open(t.Path, &spot)
 	m.setFocus(focusViewer)
-	return m, tea.Batch(cmd, m.requestInfo())
+	return m, tea.Batch(cmd, m.refreshBadges(), m.requestInfo())
 }
 
 func (m Model) mouse(msg tea.MouseMsg) (Model, tea.Cmd) {
