@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/config"
-	"deck/internal/httpc"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/httpc"
 )
 
 func TestXOnHTTPFileLoadsRequest(t *testing.T) {

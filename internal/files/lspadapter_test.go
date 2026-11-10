@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"deck/internal/lsp"
-	"deck/internal/ui"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 type fakeClient struct {

@@ -1,4 +1,4 @@
-module deck
+module github.com/kloppers-labs/deck
 
 go 1.26.3
 

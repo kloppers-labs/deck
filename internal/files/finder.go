@@ -17,8 +17,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sahilm/fuzzy"
 
-	"deck/internal/ui"
-	"deck/internal/ui/picker"
+	"github.com/kloppers-labs/deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui/picker"
 )
 
 const nameBonus = 1000

@@ -10,12 +10,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/config"
-	"deck/internal/editor"
-	"deck/internal/files"
-	"deck/internal/git"
-	"deck/internal/httpc"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/editor"
+	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/httpc"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func keyMsg(s string) tea.KeyMsg {

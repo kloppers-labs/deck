@@ -12,9 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/config"
-	"deck/internal/runner"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/runner"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func sleepMarker() string {

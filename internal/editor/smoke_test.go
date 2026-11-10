@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/config"
 )
 
 func runMicro(t *testing.T, dir, file string, target Target) State {

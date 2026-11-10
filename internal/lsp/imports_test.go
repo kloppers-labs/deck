@@ -25,7 +25,7 @@ func TestImportsStandardLibraryOnly(t *testing.T) {
 		}
 		for _, imp := range parsed.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if first, _, _ := strings.Cut(path, "/"); strings.Contains(first, ".") || first == "deck" {
+			if first, _, _ := strings.Cut(path, "/"); strings.Contains(first, ".") {
 				t.Errorf("%s imports %s; internal/lsp must use the standard library only", f, path)
 			}
 		}

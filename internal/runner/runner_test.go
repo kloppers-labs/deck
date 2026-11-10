@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/config"
 )
 
 func write(t *testing.T, dir, name string) {

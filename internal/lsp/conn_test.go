@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"deck/internal/lsp/lsptest"
+	"github.com/kloppers-labs/deck/internal/lsp/lsptest"
 )
 
 func newTestConn(t *testing.T, opts ConnOptions) (*Conn, *lsptest.Server) {

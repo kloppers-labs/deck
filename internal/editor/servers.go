@@ -7,8 +7,8 @@ import (
 	"strings"
 	"text/template"
 
-	"deck/internal/config"
-	"deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/lsp"
 )
 
 // MissingServer is an enabled language server whose binary isn't installed.

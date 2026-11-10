@@ -1,6 +1,6 @@
 package viewer
 
-import "deck/internal/ui"
+import "github.com/kloppers-labs/deck/internal/ui"
 
 // Msg is implemented by every message the viewer produces, so a container can
 // forward them without listing each type.

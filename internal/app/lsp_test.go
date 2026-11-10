@@ -10,10 +10,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/config"
-	"deck/internal/editor"
-	"deck/internal/files"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/editor"
+	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 type fakeLSP struct {

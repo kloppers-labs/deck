@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"deck/internal/lsp/lsptest"
+	"github.com/kloppers-labs/deck/internal/lsp/lsptest"
 )
 
 type fakeClock struct {

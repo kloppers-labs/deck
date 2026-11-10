@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 
-	"deck/internal/files"
-	"deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/git"
 )
 
 // gitBadges is the Files tab's BadgeSource: one porcelain v2 status call that

@@ -16,8 +16,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 
-	"deck/internal/editor"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/editor"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 const (

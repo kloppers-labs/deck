@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // ErrUnparseable marks a micro JSON file deck can't read (micro allows comments); it is left untouched.

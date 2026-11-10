@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // Target is where to open the editor. Line, Col and Top are 1-based and 0

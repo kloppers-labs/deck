@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/config"
 )
 
 type projectKind int

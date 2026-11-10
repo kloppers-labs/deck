@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func stripAll(lines []string) []string {

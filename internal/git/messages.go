@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // GenCommitMsgRequest asks the root model to generate a commit message from the

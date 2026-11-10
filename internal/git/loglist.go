@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 const logLimit = 200

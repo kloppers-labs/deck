@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func readJSON(t *testing.T, path string) map[string]any {

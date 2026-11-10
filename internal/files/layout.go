@@ -1,6 +1,6 @@
 package files
 
-import "deck/internal/ui"
+import "github.com/kloppers-labs/deck/internal/ui"
 
 const (
 	minSidebar       = 16

@@ -8,9 +8,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/config"
-	"deck/internal/git"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func TestBadgeOfEntry(t *testing.T) {

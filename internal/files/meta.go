@@ -16,8 +16,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/ui"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 // Meta is what the hover tooltip and the info panel show for one path. Lines

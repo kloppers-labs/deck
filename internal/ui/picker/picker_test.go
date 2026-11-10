@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func kp(s string) tea.KeyMsg {
@@ -88,7 +88,7 @@ func TestFuzzyRanksAndHighlights(t *testing.T) {
 	if fmt.Sprint(pos) != "[0 1 2 3]" {
 		t.Errorf("matched rune positions = %v, want [0 1 2 3]", pos)
 	}
-	if !strings.Contains(m.View(), ui.Active.Render("P")) {
+	if !strings.Contains(m.View(), ui.Active.Render("Prog")) {
 		t.Error("matched runes should be highlighted in the view")
 	}
 	m, _ = m.Update(kp("backspace"))

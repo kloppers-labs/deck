@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What deck is
 
-A Bubble Tea TUI "command center" with four tabs — **Files**, **Git**, **Run**, **HTTP** — over the current working directory. `main.go` loads config, maps `mouse` to program options (`hover` → all-motion, `click` → cell-motion, always `WithReportFocus`) builds one `lsp.Manager` from `app.LSPConfig(cfg.LSP)` (wrapped in `files.NewLSPAdapter` and passed to `app.New(cfg, warnings, nav)`; `nil` when `lsp.enabled = false`) and boots the root model in `internal/app`. After `p.Run()` returns, `main` calls `Model.StopAll` on the final model as a backstop so no task outlives deck, and a deferred `app.ShutdownLSP(mgr, 3s)` stops every language server (shutdown/exit, then a process-group kill). Everything else lives under `internal/`.
+A Bubble Tea TUI "command center" with four tabs — **Files**, **Git**, **Run**, **HTTP** — over the current working directory. The module is `github.com/kloppers-labs/deck`. `cli.go` runs first: `deck [dir]` changes into `dir`, and `--version` (the `main.version` ldflag set by GoReleaser, else the module version from build info, else `dev`) and `--help` print and exit without starting the TUI. `main.go` then loads config, maps `mouse` to program options (`hover` → all-motion, `click` → cell-motion, always `WithReportFocus`) builds one `lsp.Manager` from `app.LSPConfig(cfg.LSP)` (wrapped in `files.NewLSPAdapter` and passed to `app.New(cfg, warnings, nav)`; `nil` when `lsp.enabled = false`) and boots the root model in `internal/app`. After `p.Run()` returns, `main` calls `Model.StopAll` on the final model as a backstop so no task outlives deck, and a deferred `app.ShutdownLSP(mgr, 3s)` stops every language server (shutdown/exit, then a process-group kill). Everything else lives under `internal/`.
 
 Deck does not call any AI API directly. The only AI feature is the Git tab's `ctrl+g` commit-message helper (`internal/aicommit`), which shells out to the user's already-authenticated `claude`, `codex`, or `crush` CLI (`mods` is a deprecated alias for `crush`). Editing is delegated to `micro` (configurable) via `tea.ExecProcess`, which suspends the TUI for the duration of the child process.
 
@@ -17,6 +17,8 @@ go test ./internal/git -run TestX    # single test
 go test -race ./...                  # race detector
 go run .                             # launch the TUI
 ```
+
+Releases: pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, where GoReleaser (`.goreleaser.yaml`) builds darwin/linux × amd64/arm64 (Windows is unsupported: Unix process groups), publishes archives, `.deb`/`.rpm`/`.apk` and checksums, and pushes the Homebrew cask to `kloppers-labs/homebrew-tap` over SSH with the `HOMEBREW_TAP_DEPLOY_KEY` secret. `install.sh` installs the latest release from those archives. CI (`ci.yml`) runs gofmt, vet and `go test -race` on macOS and Linux, plus a GoReleaser snapshot build.
 
 ## Configuration (`internal/config`)
 

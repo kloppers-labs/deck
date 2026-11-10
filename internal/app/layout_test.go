@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/config"
 )
 
 func longNameFixture(t *testing.T) config.Config {

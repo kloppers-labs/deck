@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/config"
 )
 
 func writeLines(t *testing.T, path string, n int) {

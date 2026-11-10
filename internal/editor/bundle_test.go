@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/lsp"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func bundleConfig(dir string) BundleConfig {
