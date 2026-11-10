@@ -11,10 +11,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/app"
-	"deck/internal/config"
-	"deck/internal/files"
-	"deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/app"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/lsp"
 )
 
 const (
@@ -22,7 +22,13 @@ const (
 	lspShutdownTimeout = 3 * time.Second
 )
 
-func main() { os.Exit(run()) }
+func main() {
+	code, launch := cli(os.Args[1:], os.Stdout, os.Stderr)
+	if launch {
+		code = run()
+	}
+	os.Exit(code)
+}
 
 func run() int {
 	cfg, warnings := config.Load()

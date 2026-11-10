@@ -1,6 +1,6 @@
 package viewer
 
-import "deck/internal/ui"
+import "github.com/kloppers-labs/deck/internal/ui"
 
 // PlacePopup positions a w×h popup at anchor: below it when it fits, else
 // above, else as low as it can go, always clamped inside bounds.

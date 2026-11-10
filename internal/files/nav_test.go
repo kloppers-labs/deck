@@ -11,10 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/config"
-	"deck/internal/ui"
-	"deck/internal/ui/picker"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui/picker"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 type stubLSP struct {

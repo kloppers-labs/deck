@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 func envValue(env []string, key string) (string, bool) {

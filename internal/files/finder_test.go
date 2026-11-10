@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/ui/picker"
+	"github.com/kloppers-labs/deck/internal/ui/picker"
 )
 
 type fakeLister struct {

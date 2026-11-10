@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in deck doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open deck in a Go project
+        2. Press ctrl+p and type ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: deck version
+      description: Output of `deck --version`
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS and terminal
+      placeholder: macOS 15, Ghostty 1.2
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots, logs or config
+      description: A screenshot, the relevant part of your config.toml, or the LSP log (`L` in the Files tree).

@@ -10,8 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/git"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 type promptKind int

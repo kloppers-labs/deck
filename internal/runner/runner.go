@@ -13,8 +13,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/config"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // OutputMsg carries a batch of output from one run of a task.

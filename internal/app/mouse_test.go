@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/config"
-	"deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/files"
 )
 
 func press(x, y int) tea.MouseMsg {

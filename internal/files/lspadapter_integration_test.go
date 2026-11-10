@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"deck/internal/lsp"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 const adapterGoSrc = `package main

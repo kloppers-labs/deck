@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"deck/internal/config"
-	"deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/lsp"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")

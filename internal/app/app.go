@@ -18,14 +18,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/aicommit"
-	"deck/internal/config"
-	"deck/internal/editor"
-	"deck/internal/files"
-	"deck/internal/git"
-	"deck/internal/httpc"
-	"deck/internal/runner"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/aicommit"
+	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/editor"
+	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/httpc"
+	"github.com/kloppers-labs/deck/internal/runner"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 type tab int

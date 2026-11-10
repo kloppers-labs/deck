@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"deck/internal/git"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/git"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // Badge is a file's git state, ordered so a larger value is a stronger signal.

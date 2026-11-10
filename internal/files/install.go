@@ -15,9 +15,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"deck/internal/editor"
-	"deck/internal/ui"
-	"deck/internal/viewer"
+	"github.com/kloppers-labs/deck/internal/editor"
+	"github.com/kloppers-labs/deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/viewer"
 )
 
 const (

@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: deck
+
+builds:
+  - id: deck
+    main: .
+    binary: deck
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: deck
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore\\(deps\\)"
+
+nfpms:
+  - id: packages
+    package_name: deck
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: kloppers-labs
+    homepage: https://github.com/kloppers-labs/deck
+    maintainer: Gerhard Kloppers <66121776+CanadianMapleFarmer@users.noreply.github.com>
+    description: A terminal command center with Files, Git, Run and HTTP tabs.
+    license: MIT
+    section: utils
+    formats: [deb, rpm, apk]
+    recommends:
+      - git
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/deck/copyright
+        file_info:
+          mode: 0644
+
+homebrew_casks:
+  - name: deck
+    binaries: [deck]
+    homepage: https://github.com/kloppers-labs/deck
+    description: Terminal command center with Files, Git, Run and HTTP tabs
+    directory: Casks
+    commit_msg_template: "deck {{ .Tag }}"
+    repository:
+      owner: kloppers-labs
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:kloppers-labs/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
+    caveats: |
+      deck edits files in micro by default. For the full experience:
+        brew install micro fd ripgrep
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/deck"]
+          end
+    zap:
+      trash:
+        - ~/.config/deck
+
+release:
+  github:
+    owner: kloppers-labs
+    name: deck
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```sh
+    brew install kloppers-labs/tap/deck                                          # macOS
+    curl -fsSL https://raw.githubusercontent.com/kloppers-labs/deck/main/install.sh | sh   # macOS and Linux
+    go install github.com/kloppers-labs/deck@{{ .Tag }}                           # Go 1.26+
+    ```
+
+    `.deb`, `.rpm` and `.apk` packages are attached below.

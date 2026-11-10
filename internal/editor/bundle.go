@@ -5,8 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"deck/internal/lsp"
-	"deck/internal/ui"
+	"github.com/kloppers-labs/deck/internal/lsp"
+	"github.com/kloppers-labs/deck/internal/ui"
 )
 
 // BundleConfig drives one sync of deck's micro runtime. Nil lookups use the real

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/files"
 )
 
 func TestFilesTabFocusRefreshesBadges(t *testing.T) {
