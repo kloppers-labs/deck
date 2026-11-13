@@ -4,7 +4,7 @@
 
 **Your project's command center, in the terminal.**
 
-Browse and navigate code, drive git, run tasks and send HTTP requests from one fast, keyboard-first TUI.
+Browse and navigate code, drive git, run tasks and send HTTP requests from one fast, keyboard-first TUI, and explore it all together with your coding agent.
 
 [![CI](https://github.com/kloppers-labs/deck/actions/workflows/ci.yml/badge.svg)](https://github.com/kloppers-labs/deck/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/kloppers-labs/deck?sort=semver&color=bd93f9)](https://github.com/kloppers-labs/deck/releases/latest)
@@ -14,7 +14,7 @@ Browse and navigate code, drive git, run tasks and send HTTP requests from one f
 
 <img src="docs/assets/demo.gif" alt="deck: browsing code, reviewing a git diff, running tests and sending an HTTP request" width="900">
 
-[Install](#install) · [Features](#features) · [Usage](#usage) · [Configuration](#configuration) · [Contributing](CONTRIBUTING.md)
+[Install](#install) · [Features](#features) · [Usage](#usage) · [Agents](#agents) · [Configuration](#configuration) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -25,6 +25,7 @@ Most of a working day happens around the editor rather than in it: finding the f
 - **One window, four tabs.** Files, Git, Run and HTTP, switched with `1`–`4`.
 - **Code intelligence built in.** Go to definition, references, hover docs, outlines and diagnostics through a built-in LSP client for nine languages.
 - **Fast on big repos.** Rendering only touches the rows on screen, and highlighting, grep and git run in the background.
+- **Built for working with agents.** Claude Code (or any coding agent) can open files in deck, walk you through a branch's changes and see exactly what you've selected.
 - **Keyboard first, mouse friendly.** Vim-style keys everywhere, plus clicks, wheel scrolling, hover popups and draggable panes.
 - **Zero setup.** It detects your tasks, language servers and project layout. A config file is optional.
 
@@ -87,7 +88,7 @@ brew install kloppers-labs/tap/deck
 curl -fsSL https://raw.githubusercontent.com/kloppers-labs/deck/main/install.sh | sh
 ```
 
-The script installs to `~/.local/bin` and checks the download against the release checksums. Set `DECK_INSTALL_DIR` to install somewhere else, or `DECK_VERSION=0.1.0` to pin a version.
+The script installs to `~/.local/bin` and checks the download against the release checksums. Set `DECK_INSTALL_DIR` to install somewhere else, or `DECK_VERSION=0.2.0` to pin a version.
 
 ### Linux packages
 
@@ -155,6 +156,20 @@ deck --version
 
 deck lets a coding agent explore the code with you. You keep driving, and the agent can take the wheel to show you something. It always knows what you're looking at. The agent runs in its own terminal; deck can be in a split, a tab or another window.
 
+### Quick start with Claude Code
+
+```sh
+deck guide --install claude   # once: teaches Claude the deck commands (writes a Claude Code skill)
+deck                          # in your project, then in another terminal:
+claude --ide                  # or /ide in a running Claude, then pick deck
+```
+
+Then ask Claude to "walk me through the changes on this branch", select a few lines and ask "what's this doing?", or press `@` in deck to point Claude at the selection.
+
+Claude Code connects to deck as its IDE: it auto-connects when deck is already running (`--ide` or the `autoConnectIde` setting); otherwise use `/ide`. Claude sees your file and selection with every prompt (`⧉ 3 lines selected`), `@` in deck drops `@file#L118-130` into Claude's prompt, and deck's status bar shows `✦ Claude`. Edits still ask for permission in Claude's own pane. Claude only auto-connects when exactly one editor is open on the folder, so with VS Code open on it too, use `/ide`.
+
+### Commands for any agent
+
 ```sh
 deck where                      # what the user is looking at: file:line:col and the selection
 deck open src/app.go:118-130    # show a file with lines selected (or a directory)
@@ -166,9 +181,7 @@ deck ls                         # running decks
 
 If no deck is running for the project, these commands start one beside the agent's terminal. This works in Orca, cmux, Paradev, tmux, Zellij, WezTerm, kitty (with `allow_remote_control`), Ghostty, iTerm2, Terminal and Alacritty. Elsewhere they print the command to run. Agent jumps go into deck's back/forward history (`ctrl+o` returns). While you're typing they wait as a hint until you press `alt+j`. deck refreshes the open file, the tree and the Git tab as the agent edits.
 
-**Claude Code** connects to deck as its IDE. Start deck first (Claude auto-connects with `--ide` or `autoConnectIde`), or run `/ide` in Claude and pick deck. Claude then sees your file and selection with every prompt (`⧉ 3 lines selected`), `@` in deck drops `@file#L118-130` into Claude's prompt, and deck's status bar shows `✦ Claude`. Edits still ask for permission in Claude's own pane. Claude only auto-connects when exactly one editor is open on the folder, so with VS Code open on it too, use `/ide`.
-
-Teach your agent the commands with `deck guide --install claude` (writes a Claude Code skill), or paste `deck guide` into your `AGENTS.md`.
+For other agents, paste the output of `deck guide` into your `AGENTS.md`.
 
 ## Configuration
 
@@ -206,6 +219,7 @@ review_base = ""           # "" = origin's default branch, origin/main, main, �
 enabled = true             # control socket for `deck open/where/…`
 launch = "split"           # split | tab | window | off
 watch = true               # refresh as files change on disk
+watch_ms = 1000            # how often to check, at least 250
 claude = true              # Claude Code IDE bridge
 
 [[tasks]]
