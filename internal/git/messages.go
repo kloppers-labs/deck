@@ -97,3 +97,14 @@ func (headMessageMsg) RouteTo() ui.Dest    { return ui.DestGit }
 func (branchesLoadedMsg) RouteTo() ui.Dest { return ui.DestGit }
 func (logLoadedMsg) RouteTo() ui.Dest      { return ui.DestGit }
 func (showLoadedMsg) RouteTo() ui.Dest     { return ui.DestGit }
+
+// ReviewMsg opens the Review view; Path and Line, when set, select that file
+// and put the diff cursor on that new-side line (1-based).
+type ReviewMsg struct {
+	Base        string
+	Uncommitted bool
+	Path        string
+	Line        int
+}
+
+func (ReviewMsg) RouteTo() ui.Dest { return ui.DestGit }

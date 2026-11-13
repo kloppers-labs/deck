@@ -40,11 +40,19 @@ type ReloadMsg struct{}
 // Target's position.
 type RevealMsg struct{ Target editor.Target }
 
+// ReloadFileMsg reloads the open file in place, keeping the cursor.
+type ReloadFileMsg struct{}
+
+// RefreshTreeMsg re-reads the tree and badges without touching the viewer.
+type RefreshTreeMsg struct{}
+
 type hoverDueMsg struct{ seq int }
 
-func (ReloadMsg) RouteTo() ui.Dest   { return ui.DestFiles }
-func (RevealMsg) RouteTo() ui.Dest   { return ui.DestFiles }
-func (hoverDueMsg) RouteTo() ui.Dest { return ui.DestFiles }
+func (ReloadMsg) RouteTo() ui.Dest      { return ui.DestFiles }
+func (ReloadFileMsg) RouteTo() ui.Dest  { return ui.DestFiles }
+func (RefreshTreeMsg) RouteTo() ui.Dest { return ui.DestFiles }
+func (RevealMsg) RouteTo() ui.Dest      { return ui.DestFiles }
+func (hoverDueMsg) RouteTo() ui.Dest    { return ui.DestFiles }
 
 // ReloadCurrent is a command that reloads the Files tab in place.
 func ReloadCurrent() tea.Msg { return ReloadMsg{} }
@@ -377,6 +385,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.shellClosed(msg)
 	case ReloadMsg:
 		return m.reload()
+	case ReloadFileMsg:
+		var cmd tea.Cmd
+		m.viewer, cmd = m.viewer.Reload()
+		return m, cmd
+	case RefreshTreeMsg:
+		m.tree.Reload()
+		m.finder.stale = true
+		return m, m.refreshBadges()
 	case RevealMsg:
 		m.finder.stale = true
 		return m.reveal(msg.Target)

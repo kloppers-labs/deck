@@ -162,7 +162,7 @@ func (p Pane) diffLoaded(msg DiffLoadedMsg) Pane {
 	if msg.Err != nil {
 		if msg.Seq == p.diffSeq {
 			p.rawDiff, p.shownKey = "", diffKey{}
-			p.diff.SetContent(ui.Err.Render(msg.Err.Error()))
+			p.setDiffContent(ui.Err.Render(msg.Err.Error()))
 		}
 		return p
 	}
@@ -182,6 +182,9 @@ func (p Pane) diffLoaded(msg DiffLoadedMsg) Pane {
 
 func (p *Pane) setDiff(k diffKey, d cachedDiff) {
 	p.shownKey, p.rawDiff = k, d.raw
-	p.diff.SetContent(d.rendered)
+	p.setDiffContent(d.rendered)
 	p.diff.GotoTop()
+	if p.rawDiff != "" {
+		p.armDiffCursor()
+	}
 }

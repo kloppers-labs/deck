@@ -22,7 +22,7 @@ func (p Pane) View() string {
 	case p.committing:
 		content = p.commitView() + "\n" + p.diff.View()
 	default:
-		content = p.diff.View()
+		content = p.diffView()
 	}
 	style := ui.Pane
 	if p.focus == focusDiff && !p.Capturing() {
@@ -34,6 +34,9 @@ func (p Pane) View() string {
 
 func (p Pane) leftLines(lw int) []string {
 	w := max(lw-1, 0)
+	if p.mode == modeReview {
+		return p.reviewLines(w)
+	}
 	header := ui.Muted.Render("⎇ …")
 	if p.snap.Branch != "" {
 		header = headerLine(p.snap)

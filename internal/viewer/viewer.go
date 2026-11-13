@@ -4,7 +4,9 @@ package viewer
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -118,6 +120,9 @@ type Model struct {
 	hints     map[string]bool
 	flash     string
 	clicks    ui.ClickTracker
+	sel       selection
+	dragFrom  *Pos
+	selOnLoad *[2]int
 }
 
 func New(o Options) Model {
@@ -155,6 +160,10 @@ func (m *Model) nextGen() {
 // document arrives.
 func (m Model) Open(path string, at *Spot) (Model, tea.Cmd) {
 	m.nextGen()
+	if path != m.path {
+		m.clearSelection()
+	}
+	m.dragFrom, m.selOnLoad = nil, nil
 	m.path, m.pending, m.note, m.err = path, at, "", nil
 	m.doc, m.md = nil, nil
 	m.cur, m.want, m.top, m.left = Pos{}, 0, 0, 0
@@ -192,6 +201,7 @@ func (m Model) ShowNote(text string) Model {
 	m.path, m.doc, m.md, m.err, m.pending = "", nil, nil, nil, nil
 	m.note = text
 	m.prompt, m.chord = prompt{}, Chord{}
+	m.clearSelection()
 	m.resetNav()
 	m.relayout()
 	return m
@@ -214,6 +224,7 @@ func (m Model) SetRawMarkdown(raw bool) Model {
 		return m
 	}
 	m.rawMD = raw
+	m.clearSelection()
 	m.cur, m.want, m.top, m.left = Pos{}, 0, 0, 0
 	m.search.matches = nil
 	if m.search.query != "" && m.doc != nil {
@@ -250,7 +261,9 @@ func (m *Model) SetFocused(f bool) { m.focused = f }
 func (m Model) Capturing() bool { return m.prompt.kind != 0 || m.chord.Pending() }
 
 // WantsEsc reports whether esc has something to close in the viewer.
-func (m Model) WantsEsc() bool { return m.Capturing() || m.search.query != "" || m.hover.open }
+func (m Model) WantsEsc() bool {
+	return m.Capturing() || m.search.query != "" || m.hover.open || m.sel.active
+}
 
 func (m *Model) SetSize(w, h int) {
 	m.width, m.height = max(w, 0), max(h, 0)
@@ -465,6 +478,10 @@ func (m *Model) loaded(msg DocLoadedMsg) tea.Cmd {
 	if msg.Gen != m.gen {
 		return nil
 	}
+	if errors.Is(msg.Err, fs.ErrNotExist) {
+		m.err, m.doc, m.md, m.note = nil, nil, nil, "file deleted"
+		return nil
+	}
 	if msg.Err != nil {
 		m.err, m.doc = msg.Err, nil
 		return nil
@@ -482,6 +499,10 @@ func (m *Model) loaded(msg DocLoadedMsg) tea.Cmd {
 			m.setTop(p.Top)
 		}
 		m.ensureVisible()
+	}
+	if lines := m.selOnLoad; lines != nil {
+		m.selOnLoad = nil
+		*m = m.SelectLines(lines[0], lines[1])
 	}
 	return m.requestSymbols()
 }
@@ -638,14 +659,28 @@ func (m *Model) key(msg tea.KeyMsg) tea.Cmd {
 	case "*":
 		m.searchWord()
 	case "esc":
+		if m.sel.active {
+			m.clearSelection()
+			return nil
+		}
 		m.search = searchState{regex: m.search.regex}
 	case "e":
 		return m.openEditor()
-	case "y":
+	case "v":
+		m.toggleSelection(false)
+	case "V":
+		m.toggleSelection(true)
+	case "@":
+		return m.mention()
+	case "y", "Y":
+		if _, ok := m.Selection(); ok {
+			return m.copySelection(k == "Y")
+		}
+		if k == "Y" {
+			return copyCmd(raw[m.cur.Line], "line "+strconv.Itoa(m.cur.Line+1))
+		}
 		label := m.relPath() + ":" + strconv.Itoa(m.cur.Line+1)
 		return copyCmd(label, label)
-	case "Y":
-		return copyCmd(raw[m.cur.Line], "line "+strconv.Itoa(m.cur.Line+1))
 	case "W":
 		m.wrap = !m.wrap
 		m.left = 0
@@ -989,6 +1024,14 @@ func (m *Model) mouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonNone {
 		return m.dwell(msg.X, msg.Y)
 	}
+	if msg.Action == tea.MouseActionRelease {
+		m.dragFrom = nil
+		return nil
+	}
+	if msg.Action == tea.MouseActionMotion && msg.Button == tea.MouseButtonLeft {
+		m.dragTo(msg.X, msg.Y)
+		return nil
+	}
 	if msg.Action != tea.MouseActionPress || (msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight) {
 		return nil
 	}
@@ -1010,11 +1053,20 @@ func (m *Model) mouse(msg tea.MouseMsg) tea.Cmd {
 		return m.navigate(NavDefinition, m.cur, true)
 	}
 	presses := m.clicks.Press(msg.X, msg.Y, m.now())
+	if msg.Shift && !m.sel.active {
+		m.sel = selection{active: true, anchor: m.cur}
+	} else if !msg.Shift {
+		m.clearSelection()
+	}
 	switch {
 	case onText:
 		m.moveTo(p)
 	case len(raw) > 0:
 		m.moveLine(len(raw) - 1)
+	}
+	if !msg.Shift {
+		from := m.cur
+		m.dragFrom = &from
 	}
 	switch {
 	case !onText:
@@ -1061,6 +1113,8 @@ func (m Model) HelpBindings() []key.Binding {
 		key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "goto")),
 		key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit here")),
 		key.NewBinding(key.WithKeys("y", "Y"), key.WithHelp("y/Y", "copy path:line/line")),
+		key.NewBinding(key.WithKeys("v", "V"), key.WithHelp("v/V", "select chars/lines")),
+		key.NewBinding(key.WithKeys("@"), key.WithHelp("@", "point agent here")),
 		key.NewBinding(key.WithKeys("W"), key.WithHelp("W", "wrap")),
 		key.NewBinding(key.WithKeys("#"), key.WithHelp("#", "line numbers")),
 		key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "markdown raw")),

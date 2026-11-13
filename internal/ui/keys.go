@@ -21,6 +21,7 @@ type KeyMap struct {
 	HelpAlways  key.Binding
 	ToggleMouse key.Binding
 	Rerun       key.Binding
+	AgentJump   key.Binding
 	Normal      key.Binding
 }
 
@@ -90,6 +91,10 @@ var Keys = KeyMap{
 		key.WithKeys("ctrl+r"),
 		key.WithHelp("ctrl+r", "re-run last task"),
 	),
+	AgentJump: key.NewBinding(
+		key.WithKeys("alt+j"),
+		key.WithHelp(Alt("j"), "go where the agent asked"),
+	),
 	Normal: key.NewBinding(
 		key.WithKeys("esc"),
 		key.WithHelp("esc", "normal"),
@@ -101,6 +106,6 @@ func (k KeyMap) GlobalBindings() []key.Binding {
 	return []key.Binding{
 		k.Tab, k.PrevTab, k.Files, k.Git, k.Run, k.HTTP,
 		k.AltFiles, k.AltGit, k.AltRun, k.AltHTTP,
-		k.Help, k.HelpAlways, k.ToggleMouse, k.Rerun, k.Quit, k.ForceQuit,
+		k.Help, k.HelpAlways, k.ToggleMouse, k.Rerun, k.AgentJump, k.Quit, k.ForceQuit,
 	}
 }
