@@ -56,6 +56,8 @@ Most of a working day happens around the editor rather than in it: finding the f
 - Stage, unstage or discard a file or everything; commit (with amend) from a built-in commit box.
 - **AI commit messages** (`ctrl+g`) through the `claude`, `codex` or `crush` CLI you already use. deck never calls an AI API itself.
 - Branch picker (switch, create, delete), commit log, and fetch, pull and push.
+- **Review** (`v`): everything the branch changed against its base, committed and uncommitted, with per-file "viewed" ticks that clear when a file changes again.
+- A line cursor in every diff: `v` selects lines, `enter` opens the file there, `@` points your agent at them.
 
 ### Run
 
@@ -138,6 +140,9 @@ deck --version
 | `ctrl+o` / `ctrl+]` | Jump back / forward |
 | `e` | Open in your editor at the cursor |
 | `ctrl+r` | Re-run the last task |
+| `v` / `V` | Select characters / lines in the viewer |
+| `@` | Point your agent at the selection (or the cursor line) |
+| `alt+j` | Go where your agent asked, if it was held while you typed |
 | `alt+m` | Toggle mouse reporting (to select text) |
 | `?` | Searchable help for every key |
 | `q` | Quit (asks first if tasks are still running) |
@@ -145,6 +150,25 @@ deck --version
 ### Editors
 
 `e` opens the file at the current line and column. deck understands micro, vim, Neovim, Helix, Emacs, Kakoune, nano, VS Code (and forks), Zed, Sublime Text and JetBrains IDEs. Terminal editors take over the screen until you quit them. GUI editors open alongside deck. When micro closes, deck reveals the file and line you ended on (`editor_return = "origin"` goes back to where you started instead).
+
+## Agents
+
+deck lets a coding agent explore the code with you. You keep driving, and the agent can take the wheel to show you something. It always knows what you're looking at. The agent runs in its own terminal; deck can be in a split, a tab or another window.
+
+```sh
+deck where                      # what the user is looking at: file:line:col and the selection
+deck open src/app.go:118-130    # show a file with lines selected (or a directory)
+deck review                     # the branch's changes; --uncommitted, --base origin/dev
+deck diff src/app.go:42         # one file's change, cursor on line 42
+deck launch                     # start deck beside this terminal
+deck ls                         # running decks
+```
+
+If no deck is running for the project, these commands start one beside the agent's terminal. This works in Orca, cmux, Paradev, tmux, Zellij, WezTerm, kitty (with `allow_remote_control`), Ghostty, iTerm2, Terminal and Alacritty. Elsewhere they print the command to run. Agent jumps go into deck's back/forward history (`ctrl+o` returns). While you're typing they wait as a hint until you press `alt+j`. deck refreshes the open file, the tree and the Git tab as the agent edits.
+
+**Claude Code** connects to deck as its IDE. Start deck first (Claude auto-connects with `--ide` or `autoConnectIde`), or run `/ide` in Claude and pick deck. Claude then sees your file and selection with every prompt (`⧉ 3 lines selected`), `@` in deck drops `@file#L118-130` into Claude's prompt, and deck's status bar shows `✦ Claude`. Edits still ask for permission in Claude's own pane. Claude only auto-connects when exactly one editor is open on the folder, so with VS Code open on it too, use `/ide`.
+
+Teach your agent the commands with `deck guide --install claude` (writes a Claude Code skill), or paste `deck guide` into your `AGENTS.md`.
 
 ## Configuration
 
@@ -176,6 +200,13 @@ command = ["gopls", "-remote=auto"]
 
 [git]
 confirm_commit = true
+review_base = ""           # "" = origin's default branch, origin/main, main, …
+
+[agent]
+enabled = true             # control socket for `deck open/where/…`
+launch = "split"           # split | tab | window | off
+watch = true               # refresh as files change on disk
+claude = true              # Claude Code IDE bridge
 
 [[tasks]]
 name = "dev server"

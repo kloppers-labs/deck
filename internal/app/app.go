@@ -20,10 +20,13 @@ import (
 
 	"github.com/kloppers-labs/deck/internal/aicommit"
 	"github.com/kloppers-labs/deck/internal/config"
+	"github.com/kloppers-labs/deck/internal/control"
 	"github.com/kloppers-labs/deck/internal/editor"
 	"github.com/kloppers-labs/deck/internal/files"
 	"github.com/kloppers-labs/deck/internal/git"
 	"github.com/kloppers-labs/deck/internal/httpc"
+	"github.com/kloppers-labs/deck/internal/ide"
+	"github.com/kloppers-labs/deck/internal/presence"
 	"github.com/kloppers-labs/deck/internal/runner"
 	"github.com/kloppers-labs/deck/internal/ui"
 )
@@ -65,26 +68,33 @@ type cell struct{ x, y int }
 
 // Model is the top-level application state.
 type Model struct {
-	cfg        config.Config
-	warnings   []config.Warning
-	project    string
-	active     tab
-	files      files.Model
-	git        git.Pane
-	run        runner.Pane
-	httpc      httpc.Pane
-	keyHelp    help.Model
-	help       helpState
-	quit       quitState
-	toasts     []toast
-	toastSeq   int
-	mouseOn    bool
-	ed         editorState
-	lastMotion *cell
-	width      int
-	height     int
-	lsp        LSP
-	now        func() time.Time
+	cfg           config.Config
+	warnings      []config.Warning
+	project       string
+	active        tab
+	files         files.Model
+	git           git.Pane
+	run           runner.Pane
+	httpc         httpc.Pane
+	keyHelp       help.Model
+	help          helpState
+	quit          quitState
+	toasts        []toast
+	toastSeq      int
+	mouseOn       bool
+	ed            editorState
+	lastMotion    *cell
+	width         int
+	height        int
+	lsp           LSP
+	now           func() time.Time
+	pres          *presence.Store
+	controlDir    string
+	selMemo       *selMemo
+	held          *control.Request
+	watch         watchState
+	ide           IDE
+	claudeClients int
 }
 
 // New builds the root model from loaded config. warnings are shown as a toast
@@ -103,6 +113,7 @@ func New(cfg config.Config, warnings []config.Warning, nav LSP) Model {
 			Theme:         cfg.Theme,
 			CommitAI:      aicommit.Available(cfg.AIBackend),
 			ConfirmCommit: cfg.Git.ConfirmCommit,
+			ReviewBase:    cfg.Git.ReviewBase,
 		}),
 		run:     runner.NewPane(cfg.Tasks, ""),
 		httpc:   httpc.NewPane(cfg.Theme),
@@ -137,7 +148,7 @@ func newKeyHelp() help.Model {
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.files.Init(), git.Refresh, m.warningToast(), m.run.Init(), m.ed.syncCmd(),
-		files.ListenLSP(m.files.LSP()), prestartCmd(m.lsp, m.ed.cwd))
+		files.ListenLSP(m.files.LSP()), prestartCmd(m.lsp, m.ed.cwd), m.watchCmd(1))
 }
 
 func (m Model) warningToast() tea.Cmd {
@@ -189,9 +200,9 @@ func (m Model) focusCmd() tea.Cmd {
 	return nil
 }
 
-// Update handles global keys, mouse translation and app-level messages, and
+// update handles global keys, mouse translation and app-level messages, and
 // delivers every ui.Routed message to its destination whichever tab is active.
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
@@ -216,6 +227,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editorClosedMsg:
 		return m.editorClosed(msg)
+
+	case watchTickMsg, fileStampMsg, treePrintMsg:
+		return m.watchMsg(msg)
 
 	case toastExpireMsg:
 		m.toasts = withoutToast(m.toasts, msg.id)
@@ -269,6 +283,16 @@ func (m Model) routeTo(dest ui.Dest, msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case editor.ResyncMsg:
 			return m, m.ed.resyncCmd()
+		case ui.MentionMsg:
+			return m.mention(msg)
+		case control.RequestMsg:
+			return m.control(msg)
+		case ide.ClientsMsg:
+			return m.clientsChanged(msg)
+		case ui.ShowFileMsg:
+			m.active = tabFiles
+			m.files, cmd = m.files.AgentOpen(msg.Path, msg.Line, 0, 0)
+			return m, cmd
 		}
 	case ui.DestFiles:
 		m.files, cmd = m.files.Update(msg)
@@ -337,6 +361,10 @@ func (m *Model) globalKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, true
 	case key.Matches(msg, ui.Keys.ToggleMouse):
 		return m.toggleMouse(), true
+	case key.Matches(msg, ui.Keys.AgentJump) && m.held != nil:
+		next, cmd := m.applyHeld()
+		*m = next
+		return cmd, true
 	}
 	if m.capturing() {
 		return nil, false
@@ -482,6 +510,12 @@ func (m Model) statusBar() string {
 	}
 	left := statusLeft(project, m.git.Branch(), m.git.DirtyCount(), m.run.RunningCount())
 	right := lspBadges(m.files.LSPStatus(), m.now())
+	if b := m.claudeBadge(); b != "" {
+		right = append([]string{b}, right...)
+	}
+	if h := m.heldStatus(); h != "" {
+		right = append(right, h)
+	}
 	if n := len(m.toasts); n > 0 {
 		right = append(right, m.toasts[n-1].msg.Render())
 	}

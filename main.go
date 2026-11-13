@@ -14,6 +14,7 @@ import (
 	"github.com/kloppers-labs/deck/internal/app"
 	"github.com/kloppers-labs/deck/internal/config"
 	"github.com/kloppers-labs/deck/internal/files"
+	"github.com/kloppers-labs/deck/internal/ide"
 	"github.com/kloppers-labs/deck/internal/lsp"
 )
 
@@ -32,13 +33,34 @@ func main() {
 
 func run() int {
 	cfg, warnings := config.Load()
+	agent, agentWarnings := prepareAgent(cfg)
+	warnings = append(warnings, agentWarnings...)
+	ref := &programRef{}
+	var bridge *ide.Bridge
+	if agent != nil && cfg.Agent.Claude {
+		var bridgeWarnings []config.Warning
+		bridge, bridgeWarnings = agent.startBridge(ref.send)
+		warnings = append(warnings, bridgeWarnings...)
+	}
 	mgr := lsp.NewManager(app.LSPConfig(cfg.LSP))
 	defer app.ShutdownLSP(mgr, lspShutdownTimeout)
 	var nav app.LSP
 	if cfg.LSP.Enabled {
 		nav = files.NewLSPAdapter(mgr)
 	}
-	p := tea.NewProgram(app.New(cfg, warnings, nav), programOptions(cfg.Mouse)...)
+	model := app.New(cfg, warnings, nav)
+	if agent != nil {
+		model = model.WithAgent(agent.store, agent.dir)
+	}
+	if bridge != nil {
+		model = model.WithIDE(bridge)
+		defer bridge.Close()
+	}
+	p := tea.NewProgram(model, programOptions(cfg.Mouse)...)
+	ref.p.Store(p)
+	if agent != nil {
+		defer agent.serve(p)()
+	}
 	defer quitOnHangup(p)()
 	final, err := p.Run()
 	if m, ok := final.(app.Model); ok {

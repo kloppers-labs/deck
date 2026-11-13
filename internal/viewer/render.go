@@ -119,6 +119,9 @@ func (m Model) rowSpans(raw []string, line, start int, l Layout) []Span {
 	if m.focused && line == m.cur.Line {
 		spans = append(spans, Span{Start: 0, End: l.TextW, SGR: cursorLineSGR})
 	}
+	if sp, ok := m.selectionSpan(raw, line, start, l); ok {
+		spans = append(spans, sp)
+	}
 	ms := m.search.matches
 	i := sort.Search(len(ms), func(i int) bool { return ms[i].Line >= line })
 	for ; i < len(ms) && ms[i].Line == line; i++ {

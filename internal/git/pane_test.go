@@ -276,12 +276,13 @@ func TestDiffFocusScrollsOnly(t *testing.T) {
 	if p.focus != focusDiff {
 		t.Fatal("enter should focus the diff")
 	}
+	start := p.dc.row
 	p, _ = press(p, "j", "j")
-	if p.diff.YOffset != 2 || p.cursor != 0 {
-		t.Errorf("in the diff, j should scroll only: offset %d cursor %d", p.diff.YOffset, p.cursor)
+	if p.dc.row != start+2 || p.cursor != 0 {
+		t.Errorf("in the diff, j should move the diff cursor only: row %d (from %d), list cursor %d", p.dc.row, start, p.cursor)
 	}
 	p, _ = press(p, "G")
-	if p.diff.YOffset == 2 {
+	if p.diff.YOffset == 0 {
 		t.Error("G should jump to the bottom of the diff")
 	}
 	p, _ = press(p, "g")

@@ -97,7 +97,7 @@ func (p Pane) openLog() (Pane, tea.Cmd) {
 	}
 	p.mode, p.focus, p.logLoaded = modeLog, focusList, false
 	p.rawDiff, p.shownKey = "", diffKey{}
-	p.diff.SetContent(ui.Muted.Render("enter shows the selected commit"))
+	p.setDiffContent(ui.Muted.Render("enter shows the selected commit"))
 	repo := p.repo
 	return p, func() tea.Msg {
 		entries, err := repo.Log(context.Background(), logLimit)
@@ -148,7 +148,7 @@ func (p Pane) logKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
 		}
 		p.focus = focusDiff
 		p.rawDiff, p.shownKey = "", diffKey{}
-		p.diff.SetContent(ui.Muted.Render("loading " + e.Hash + "…"))
+		p.setDiffContent(ui.Muted.Render("loading " + e.Hash + "…"))
 		repo, hash := p.repo, e.Hash
 		return p, func() tea.Msg {
 			text, err := repo.Show(context.Background(), hash)
@@ -164,14 +164,14 @@ func (p Pane) logKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
 }
 
 func (p Pane) showLoaded(msg showLoadedMsg) Pane {
-	if p.mode != modeLog {
+	if p.mode != modeLog && p.mode != modeReview {
 		return p
 	}
 	if msg.err != nil {
-		p.diff.SetContent(ui.Err.Render(msg.err.Error()))
+		p.setDiffContent(ui.Err.Render(msg.err.Error()))
 		return p
 	}
-	p.diff.SetContent(highlightDiff(p.opts.Theme, capDiff(msg.text, diffCap)))
+	p.setDiffContent(highlightDiff(p.opts.Theme, capDiff(msg.text, diffCap)))
 	p.diff.GotoTop()
 	return p
 }

@@ -32,6 +32,7 @@ type Options struct {
 	CommitAI      bool
 	ConfirmCommit bool
 	Dir           string
+	ReviewBase    string
 }
 
 type focus int
@@ -46,6 +47,7 @@ type mode int
 const (
 	modeChanges mode = iota
 	modeLog
+	modeReview
 )
 
 type cachedDiff struct{ raw, rendered string }
@@ -77,6 +79,7 @@ type Pane struct {
 	stamps     map[string]int64
 
 	diff     viewport.Model
+	dc       diffCursor
 	diffSeq  int
 	cache    map[diffKey]cachedDiff
 	shownKey diffKey
@@ -100,6 +103,8 @@ type Pane struct {
 
 	logList   list.Model
 	logLoaded bool
+
+	review reviewState
 
 	pending *confirmPrompt
 	busy    string
@@ -218,13 +223,36 @@ func (p Pane) withSpin(spinningBefore bool, cmd tea.Cmd) tea.Cmd {
 func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 	p, cmd := p.update(msg)
 	p.offset = p.scrollOffset()
+	p.review.offset = p.reviewScrollOffset()
 	return p, cmd
 }
 
 func (p Pane) update(msg tea.Msg) (Pane, tea.Cmd) {
 	switch msg := msg.(type) {
 	case RefreshMsg:
-		return p.reload()
+		p, cmd := p.reload()
+		if p.mode == modeReview {
+			var review tea.Cmd
+			p, review = p.loadReview()
+			cmd = tea.Batch(cmd, review)
+		}
+		return p, cmd
+	case ReviewMsg:
+		return p.openReview(msg)
+	case reviewLoadedMsg:
+		return p.reviewLoaded(msg)
+	case reviewDiffDueMsg:
+		if msg.seq != p.review.diffSeq || p.mode != modeReview {
+			return p, nil
+		}
+		return p.fetchReviewDiff()
+	case reviewDiffMsg:
+		return p.reviewDiffLoaded(msg), nil
+	case viewedSavedMsg:
+		if msg.err != nil {
+			p.setStatus("save viewed: "+msg.err.Error(), true)
+		}
+		return p, nil
 	case StatusLoadedMsg:
 		return p.applyStatus(msg)
 	case diffDueMsg:
@@ -396,6 +424,8 @@ func (p Pane) key(msg tea.KeyMsg) (Pane, tea.Cmd) {
 		return p.diffKeys(msg)
 	case p.mode == modeLog:
 		return p.logKey(msg)
+	case p.mode == modeReview:
+		return p.reviewKey(msg)
 	}
 	return p.listKey(msg)
 }
@@ -436,6 +466,8 @@ func (p Pane) listKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
 		return p.startBusy("push", "pushing…", func(ctx context.Context, r *Repo) error { return r.Push(ctx, branch, upstream) })
 	case "l":
 		return p.openLog()
+	case "v":
+		return p.openReview(ReviewMsg{})
 	case "e":
 		return p.edit()
 	case "r":
@@ -445,6 +477,11 @@ func (p Pane) listKey(msg tea.KeyMsg) (Pane, tea.Cmd) {
 }
 
 func (p Pane) diffKeys(msg tea.KeyMsg) (Pane, tea.Cmd) {
+	if p.cursorActive() {
+		if next, cmd, ok := p.cursorDiffKeys(msg); ok {
+			return next, cmd
+		}
+	}
 	switch msg.String() {
 	case "j", "down":
 		p.diff.ScrollDown(1)
@@ -465,8 +502,11 @@ func (p Pane) diffKeys(msg tea.KeyMsg) (Pane, tea.Cmd) {
 	case "esc", "h", "left":
 		p.focus = focusList
 	case "e":
-		if p.mode == modeChanges {
+		switch p.mode {
+		case modeChanges:
 			return p.edit()
+		case modeReview:
+			return p.reviewEdit()
 		}
 	}
 	return p, nil
@@ -579,6 +619,9 @@ func (p Pane) mouse(msg tea.MouseMsg) (Pane, tea.Cmd) {
 		return p, nil
 	}
 	inList := msg.X < p.listWidth()
+	if inList && p.mode == modeReview {
+		return p.reviewMouse(msg)
+	}
 	switch msg.Button {
 	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
 		delta := 1
@@ -588,8 +631,10 @@ func (p Pane) mouse(msg tea.MouseMsg) (Pane, tea.Cmd) {
 		switch {
 		case !inList && delta > 0:
 			p.diff.ScrollDown(wheelStep)
+			p.keepCursorInView()
 		case !inList:
 			p.diff.ScrollUp(wheelStep)
+			p.keepCursorInView()
 		case p.mode == modeLog:
 			p.logStep(delta)
 		default:
@@ -602,6 +647,9 @@ func (p Pane) mouse(msg tea.MouseMsg) (Pane, tea.Cmd) {
 		}
 		if !inList {
 			p.focus = focusDiff
+			if p.cursorActive() {
+				p.moveDiffCursor(p.diff.YOffset + msg.Y - 1)
+			}
 			return p, nil
 		}
 		p.focus = focusList
@@ -668,6 +716,10 @@ var (
 	bindNew      = key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new"))
 	bindDelete   = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete"))
 	bindFilter   = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
+
+	bindDiffSelect = key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "select lines"))
+	bindDiffOpen   = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open in files"))
+	bindPoint      = key.NewBinding(key.WithKeys("@"), key.WithHelp("@", "point agent here"))
 )
 
 // HelpBindings returns the key hints for the pane's current state.
@@ -683,11 +735,15 @@ func (p Pane) HelpBindings() []key.Binding {
 		return append(b, bindCancel)
 	case p.branching:
 		return []key.Binding{bindSwitch, bindNew, bindDelete, bindFilter, bindCancel}
+	case p.focus == focusDiff && p.cursorActive():
+		return []key.Binding{bindMove, bindEnds, bindDiffSelect, bindDiffOpen, bindPoint, bindEdit, bindBack}
 	case p.focus == focusDiff:
 		return []key.Binding{bindScroll, bindEnds, bindEdit, bindBack}
 	case p.mode == modeLog:
 		return []key.Binding{bindMove, bindShow, bindBack}
+	case p.mode == modeReview:
+		return p.reviewBindings()
 	}
 	return []key.Binding{bindMove, bindDiff, bindStage, bindAll, bindDiscard, bindCommit,
-		bindBranches, bindRemote, bindLog, bindEdit, bindRefresh}
+		bindBranches, bindRemote, bindLog, bindReview, bindEdit, bindRefresh}
 }

@@ -52,3 +52,16 @@ func (h *History) Forward() (Loc, bool) {
 	h.pos++
 	return h.entries[h.pos], true
 }
+
+// Recent lists up to n distinct paths from the jump list, newest first.
+func (h *History) Recent(n int) []string {
+	var out []string
+	seen := map[string]bool{}
+	for i := len(h.entries) - 1; i >= 0 && len(out) < n; i-- {
+		if p := h.entries[i].Path; p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}

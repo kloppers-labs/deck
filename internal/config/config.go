@@ -35,6 +35,7 @@ type Config struct {
 	Viewer       Viewer `toml:"viewer"`
 	LSP          LSP    `toml:"lsp"`
 	Git          Git    `toml:"git"`
+	Agent        Agent  `toml:"agent"`
 	Tasks        []Task `toml:"tasks"`
 }
 
@@ -77,8 +78,21 @@ type LSPServer struct {
 func (s LSPServer) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
 type Git struct {
-	ConfirmCommit bool `toml:"confirm_commit"`
+	ConfirmCommit bool   `toml:"confirm_commit"`
+	ReviewBase    string `toml:"review_base"`
 }
+
+// Agent configures how coding agents drive deck: the control socket, launching
+// deck next to an agent, live polling and the Claude Code IDE bridge.
+type Agent struct {
+	Enabled bool   `toml:"enabled"`
+	Launch  string `toml:"launch"`
+	Watch   bool   `toml:"watch"`
+	WatchMS int    `toml:"watch_ms"`
+	Claude  bool   `toml:"claude"`
+}
+
+const minWatchMS = 250
 
 // Task is a named dev command for the Run tab. Cmd runs via "sh -c" in Dir
 // (relative to the project root) with Env added to the environment.
@@ -133,7 +147,8 @@ func Default() Config {
 			RequestTimeoutMS: 8000,
 			OfferInstall:     true,
 		},
-		Git: Git{ConfirmCommit: true},
+		Git:   Git{ConfirmCommit: true},
+		Agent: Agent{Enabled: true, Launch: "split", Watch: true, WatchMS: 1000, Claude: true},
 	}
 }
 
@@ -342,6 +357,7 @@ func validate(c *Config) []Warning {
 		{"editor_return", &c.EditorReturn, d.EditorReturn, []string{"follow", "origin"}},
 		{"micro_lsp", &c.MicroLSP, d.MicroLSP, []string{"on", "off"}},
 		{"files.icons", &c.Files.Icons, d.Files.Icons, []string{"unicode", "nerd", "none"}},
+		{"agent.launch", &c.Agent.Launch, d.Agent.Launch, []string{"split", "tab", "window", "off"}},
 	}
 	var out []Warning
 	for _, e := range enums {
@@ -351,6 +367,11 @@ func validate(c *Config) []Warning {
 		out = append(out, Warning{Message: fmt.Sprintf("%s = %q is not one of %s; using %q",
 			e.key, *e.val, strings.Join(e.choices, ", "), e.def)})
 		*e.val = e.def
+	}
+	if c.Agent.WatchMS < minWatchMS {
+		out = append(out, Warning{Message: fmt.Sprintf("agent.watch_ms = %d is below %d; using %d",
+			c.Agent.WatchMS, minWatchMS, minWatchMS)})
+		c.Agent.WatchMS = minWatchMS
 	}
 	return out
 }
